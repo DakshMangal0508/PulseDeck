@@ -1,0 +1,12 @@
+.venv/
+venv/
+node_modules/
+dist/
+__pycache__/
+*.py[cod]
+*.log
+.env
+.env.*
+!.env.example
+.pytest_cache/
+.coverage
