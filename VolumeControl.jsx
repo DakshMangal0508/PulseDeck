@@ -4,7 +4,7 @@ import { Volume2, VolumeX } from 'lucide-react';
 function TouchVolumePill({ label, target, value, onChange, colorClass, icon: Icon }) {
   return (
     <div
-      className="volume-control group relative flex h-12 w-full select-none items-center overflow-hidden px-3.5 focus-within:ring-2 focus-within:ring-cyan-300/60"
+      className="volume-control group relative flex h-12 w-full select-none items-center overflow-hidden px-3.5 focus-within:ring-2 focus-within:ring-[#b4ff00]/60"
     >
       <div
         className={`pointer-events-none absolute inset-y-0 left-0 transition-all duration-100 ${colorClass}`}

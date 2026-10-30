@@ -46,7 +46,7 @@ Use consistent pads with an icon, action name, and shortcut label. Keep the sele
 
 - Background: near-black blue-gray.
 - Surfaces: layered graphite cards with subtle borders.
-- Primary accent: cyan for selection and playback.
+- Primary accent: rgb(180, 255, 0) for selection and playback.
 - Status: green for connected/active; amber or rose for warnings and destructive actions.
 - Typography: system sans for labels; tabular numerals for time and percentages.
 - Motion: brief press feedback; respect reduced-motion settings.

@@ -1,12 +1,23 @@
 import hmac
 import asyncio
 import base64
+import ctypes
+import hashlib
+import io
 import json
 import os
+import secrets
+import sqlite3
+import subprocess
+import threading
 import time
 import urllib.parse
 import urllib.request
-from contextlib import asynccontextmanager
+import winreg
+import winsound
+import wave
+import uuid
+from contextlib import asynccontextmanager, contextmanager
 import keyboard
 import psutil
 import uvicorn
@@ -14,6 +25,9 @@ import win32gui
 import win32process
 from comtypes import CoInitialize, CoUninitialize
 from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 from fastapi.middleware.cors import CORSMiddleware
 from pycaw.pycaw import AudioUtilities
 from winrt.windows.media.control import GlobalSystemMediaTransportControlsSessionManager as MediaManager
@@ -26,10 +40,14 @@ except ImportError:
     discord = None
 
 from validation import (
+    AppLaunchPayload,
     ALLOWED_SHORTCUTS,
     DiscordPayload,
     HotkeyPayload,
     MediaPayload,
+    SoundRenamePayload,
+    SoundboardPayload,
+    SoundUploadPayload,
     VolumePayload,
 )
 
@@ -151,8 +169,53 @@ async def lifespan(_app):
 
 
 API_TOKEN = os.getenv("PULSEDECK_API_TOKEN", "")
-if not API_TOKEN:
-    raise RuntimeError("Set PULSEDECK_API_TOKEN before starting PulseDeck.")
+AUTH_SESSION_KEY = secrets.token_hex(32)
+AUTH_DIR = (
+    os.path.join(os.environ["LOCALAPPDATA"], "PulseDeck")
+    if os.environ.get("LOCALAPPDATA")
+    else os.path.join(os.path.expanduser("~"), ".pulsedeck")
+)
+os.makedirs(AUTH_DIR, exist_ok=True)
+AUTH_DB_PATH = os.path.join(AUTH_DIR, "accounts.sqlite3")
+AUTH_SESSIONS: dict[str, str] = {}
+AUTH_ATTEMPTS: dict[str, list[float]] = {}
+AUTH_LOCK = threading.Lock()
+PASSWORD_HASH_ROUNDS = 310_000
+
+
+class AccountCredentials(BaseModel):
+    username: str = Field(min_length=3, max_length=32)
+    password: str = Field(min_length=10, max_length=256)
+
+
+@contextmanager
+def auth_db():
+    connection = sqlite3.connect(AUTH_DB_PATH, timeout=5)
+    try:
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS account (id INTEGER PRIMARY KEY CHECK (id = 1), username TEXT NOT NULL UNIQUE, salt BLOB NOT NULL, password_hash BLOB NOT NULL)"
+        )
+        yield connection
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
+with auth_db() as auth_connection:
+    pass
+
+
+def password_digest(password: str, salt: bytes) -> bytes:
+    return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, PASSWORD_HASH_ROUNDS)
+
+
+def issue_session(username: str) -> str:
+    token = secrets.token_urlsafe(32)
+    AUTH_SESSIONS[hashlib.sha256(token.encode("utf-8")).hexdigest()] = username
+    return token
 
 ALLOWED_ORIGINS = [
     origin.strip()
@@ -171,12 +234,162 @@ app.add_middleware(
     allow_headers=["Content-Type", "X-API-Token"],
 )
 
+FRONTEND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dist")
+FRONTEND_ASSETS_DIR = os.path.join(FRONTEND_DIR, "assets")
+if os.path.isdir(FRONTEND_ASSETS_DIR):
+    app.mount("/assets", StaticFiles(directory=FRONTEND_ASSETS_DIR), name="frontend-assets")
+
+
+@app.get("/", include_in_schema=False)
+def serve_frontend():
+    index_path = os.path.join(FRONTEND_DIR, "index.html")
+    if not os.path.isfile(index_path):
+        raise HTTPException(status_code=404, detail="Build the web app with npm run build first")
+    return FileResponse(index_path)
+
+
+@app.get("/api/auth/status")
+def get_auth_status():
+    with auth_db() as connection:
+        configured = connection.execute("SELECT 1 FROM account WHERE id = 1").fetchone() is not None
+    return {"account_configured": configured}
+
+
+@app.post("/api/auth/register")
+def register_account(credentials: AccountCredentials):
+    username = credentials.username.strip()
+    if len(username) < 3:
+        raise HTTPException(status_code=422, detail="Username must contain at least 3 characters")
+    with AUTH_LOCK, auth_db() as connection:
+        if connection.execute("SELECT 1 FROM account WHERE id = 1").fetchone():
+            raise HTTPException(status_code=409, detail="An account is already set up on this PC")
+        salt = secrets.token_bytes(16)
+        connection.execute(
+            "INSERT INTO account (id, username, salt, password_hash) VALUES (1, ?, ?, ?)",
+            (username, salt, password_digest(credentials.password, salt)),
+        )
+    return {"token": issue_session(username), "username": username}
+
+
+@app.post("/api/auth/login")
+def login_account(credentials: AccountCredentials):
+    client_key = "local"  # The PC hosts a single local account.
+    now = time.monotonic()
+    recent_attempts = [stamp for stamp in AUTH_ATTEMPTS.get(client_key, []) if now - stamp < 60]
+    if len(recent_attempts) >= 8:
+        AUTH_ATTEMPTS[client_key] = recent_attempts
+        raise HTTPException(status_code=429, detail="Too many login attempts. Wait one minute and try again.")
+    with auth_db() as connection:
+        row = connection.execute("SELECT username, salt, password_hash FROM account WHERE id = 1").fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Create an account on this PC first")
+    username, salt, expected_hash = row
+    supplied_hash = password_digest(credentials.password, salt)
+    supplied_username = credentials.username.strip().casefold().encode("utf-8")
+    if not hmac.compare_digest(username.casefold().encode("utf-8"), supplied_username) or not hmac.compare_digest(supplied_hash, expected_hash):
+        recent_attempts.append(now)
+        AUTH_ATTEMPTS[client_key] = recent_attempts
+        raise HTTPException(status_code=401, detail="Username or password is incorrect")
+    AUTH_ATTEMPTS.pop(client_key, None)
+    return {"token": issue_session(username), "username": username}
+
+
+@app.post("/api/auth/logout")
+def logout_account(x_api_token: str | None = Header(default=None)):
+    if x_api_token:
+        AUTH_SESSIONS.pop(hashlib.sha256(x_api_token.encode("utf-8")).hexdigest(), None)
+    return {"status": "ok"}
+
 ARTWORK_CACHE: dict[str, tuple[str, float | None]] = {}
+SOUNDBOARD_DIR = (
+    os.path.join(os.environ["LOCALAPPDATA"], "PulseDeck", "sounds")
+    if os.environ.get("LOCALAPPDATA")
+    else os.path.join(os.path.expanduser("~"), ".pulsedeck", "sounds")
+)
+BUILTIN_SOUNDS = {
+    "notification": winsound.MB_ICONASTERISK,
+    "alert": winsound.MB_ICONEXCLAMATION,
+    "error": winsound.MB_ICONHAND,
+    "question": winsound.MB_ICONQUESTION,
+}
+SOUNDBOARD_MCI_LOCK = threading.Lock()
+
+
+def play_mp3_with_windows_media(path: str) -> None:
+    mci = ctypes.windll.winmm.mciSendStringW
+    mci.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint, ctypes.c_void_p]
+    mci.restype = ctypes.c_uint
+    with SOUNDBOARD_MCI_LOCK:
+        mci("stop pulsedeck_sound", None, 0, None)
+        mci("close pulsedeck_sound", None, 0, None)
+        result = mci(f'open "{path}" type mpegvideo alias pulsedeck_sound', None, 0, None)
+        if result:
+            raise RuntimeError("Windows could not open the MP3 file")
+        result = mci("play pulsedeck_sound", None, 0, None)
+        if result:
+            mci("close pulsedeck_sound", None, 0, None)
+            raise RuntimeError("Windows could not play the MP3 file")
+
+# Launch targets are fixed here so a browser request can never supply a command or path.
+APP_LAUNCHERS = {
+    "spotify": {"label": "Spotify", "protocol": "spotify:"},
+    "discord": {"label": "Discord", "protocol": "discord:"},
+    "chrome": {
+        "label": "Chrome", "executable": "chrome.exe",
+        "paths": [
+            os.path.join(os.environ.get("LOCALAPPDATA", ""), "Google", "Chrome", "Application", "chrome.exe"),
+            os.path.join(os.environ.get("PROGRAMFILES", "C:\\Program Files"), "Google", "Chrome", "Application", "chrome.exe"),
+            os.path.join(os.environ.get("PROGRAMFILES(X86)", "C:\\Program Files (x86)"), "Google", "Chrome", "Application", "chrome.exe"),
+        ],
+    },
+    "edge": {
+        "label": "Edge", "executable": "msedge.exe",
+        "paths": [
+            os.path.join(os.environ.get("PROGRAMFILES(X86)", "C:\\Program Files (x86)"), "Microsoft", "Edge", "Application", "msedge.exe"),
+            os.path.join(os.environ.get("PROGRAMFILES", "C:\\Program Files"), "Microsoft", "Edge", "Application", "msedge.exe"),
+        ],
+    },
+    "vscode": {
+        "label": "VS Code", "executable": "Code.exe",
+        "paths": [
+            os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Microsoft VS Code", "Code.exe"),
+            os.path.join(os.environ.get("PROGRAMFILES", "C:\\Program Files"), "Microsoft VS Code", "Code.exe"),
+        ],
+    },
+    "explorer": {"label": "Explorer", "paths": [os.path.join(os.environ.get("WINDIR", "C:\\Windows"), "explorer.exe")]},
+    "notepad": {"label": "Notepad", "paths": [os.path.join(os.environ.get("WINDIR", "C:\\Windows"), "System32", "notepad.exe")]},
+}
+
+
+def resolve_launcher_executable(app_id: str) -> str | None:
+    launcher = APP_LAUNCHERS[app_id]
+    for candidate in launcher.get("paths", []):
+        if candidate and os.path.isfile(candidate):
+            return candidate
+
+    executable = launcher.get("executable")
+    if executable:
+        app_path_key = rf"Software\Microsoft\Windows\CurrentVersion\App Paths\{executable}"
+        for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+            try:
+                with winreg.OpenKey(hive, app_path_key) as key:
+                    registered_path, _ = winreg.QueryValueEx(key, None)
+                registered_path = registered_path.strip().strip('"')
+                if os.path.isfile(registered_path):
+                    return registered_path
+            except (OSError, ValueError):
+                continue
+    return None
 
 
 def require_token(x_api_token: str | None = Header(default=None)):
-    if not x_api_token or not hmac.compare_digest(x_api_token, API_TOKEN):
-        raise HTTPException(status_code=401, detail="Invalid or missing API token")
+    if x_api_token:
+        token_hash = hashlib.sha256(x_api_token.encode("utf-8")).hexdigest()
+        if token_hash in AUTH_SESSIONS:
+            return AUTH_SESSIONS[token_hash]
+        if API_TOKEN and hmac.compare_digest(x_api_token, API_TOKEN):
+            return "legacy"
+    raise HTTPException(status_code=401, detail="Sign in to control this PC")
 
 
 def fetch_album_art(artist: str, title: str) -> str:
@@ -427,7 +640,8 @@ APP_DISPLAY_NAMES = {
 
 def audio_session_key(session) -> str:
     identifier = session.InstanceIdentifier
-    return hmac.new(API_TOKEN.encode("utf-8"), identifier.encode("utf-8"), "sha256").hexdigest()
+    key = API_TOKEN or AUTH_SESSION_KEY
+    return hmac.new(key.encode("utf-8"), identifier.encode("utf-8"), "sha256").hexdigest()
 
 
 def get_session_volumes():
@@ -520,6 +734,183 @@ def trigger_hotkey(data: HotkeyPayload):
     except Exception as exc:
         raise HTTPException(status_code=502, detail="Windows could not send the shortcut") from exc
     return {"status": "ok", "shortcut": shortcut}
+
+
+@app.post("/api/apps/open", dependencies=[Depends(require_token)])
+def open_app(data: AppLaunchPayload):
+    launcher = APP_LAUNCHERS.get(data.app_id)
+    if not launcher:
+        raise HTTPException(status_code=422, detail="App is not in the launch allowlist")
+    try:
+        protocol = launcher.get("protocol")
+        if protocol:
+            os.startfile(protocol)
+        else:
+            executable = resolve_launcher_executable(data.app_id)
+            if not executable:
+                raise HTTPException(status_code=404, detail=f"{launcher['label']} was not found on this PC")
+            subprocess.Popen([executable], close_fds=True)
+    except HTTPException:
+        raise
+    except OSError as exc:
+        raise HTTPException(status_code=502, detail=f"Windows could not open {launcher['label']}") from exc
+    return {"status": "ok", "app_id": data.app_id}
+
+
+@app.get("/api/soundboard", dependencies=[Depends(require_token)])
+def list_soundboard_sounds():
+    os.makedirs(SOUNDBOARD_DIR, exist_ok=True)
+    custom_sounds = []
+    for filename in os.listdir(SOUNDBOARD_DIR):
+        sound_id, extension = os.path.splitext(filename)
+        if extension.lower() not in (".wav", ".mp3"):
+            continue
+        try:
+            uuid.UUID(sound_id)
+        except ValueError:
+            continue
+        name_path = os.path.join(SOUNDBOARD_DIR, f"{sound_id}.json")
+        try:
+            with open(name_path, "r", encoding="utf-8") as sound_file:
+                name = json.load(sound_file).get("name", sound_id)
+        except (OSError, ValueError, AttributeError):
+            name = sound_id
+        custom_sounds.append({"id": sound_id, "name": name})
+    custom_sounds.sort(key=lambda sound: sound["name"].casefold())
+    return {"sounds": custom_sounds}
+
+
+@app.post("/api/soundboard/upload", dependencies=[Depends(require_token)])
+def upload_soundboard_sound(data: SoundUploadPayload):
+    name = data.name.strip()
+    if not name or not all(character.isprintable() for character in name):
+        raise HTTPException(status_code=422, detail="Enter a printable sound name")
+
+    try:
+        audio_data = base64.b64decode(data.audio_base64, validate=True)
+    except (ValueError, base64.binascii.Error) as exc:
+        raise HTTPException(status_code=422, detail="The uploaded sound is not valid base64 data") from exc
+    if len(audio_data) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Sound files must be 10 MB or smaller")
+
+    extension = f".{data.file_type}"
+    if data.file_type == "wav":
+        try:
+            with wave.open(io.BytesIO(audio_data), "rb") as wav_file:
+                if wav_file.getcomptype() != "NONE":
+                    raise HTTPException(status_code=422, detail="Use an uncompressed PCM WAV file")
+                if wav_file.getnchannels() not in (1, 2) or wav_file.getsampwidth() not in (1, 2):
+                    raise HTTPException(status_code=422, detail="WAV files must be mono or stereo, 8-bit or 16-bit PCM")
+                if not 8000 <= wav_file.getframerate() <= 48000:
+                    raise HTTPException(status_code=422, detail="WAV sample rate must be between 8 kHz and 48 kHz")
+                if wav_file.getnframes() / wav_file.getframerate() > 60:
+                    raise HTTPException(status_code=422, detail="WAV clips must be 60 seconds or shorter")
+        except (wave.Error, EOFError) as exc:
+            raise HTTPException(status_code=422, detail="Choose a valid PCM WAV file") from exc
+    else:
+        frame_start = 0
+        if audio_data.startswith(b"ID3") and len(audio_data) >= 10:
+            tag_size = ((audio_data[6] & 0x7F) << 21) | ((audio_data[7] & 0x7F) << 14) | ((audio_data[8] & 0x7F) << 7) | (audio_data[9] & 0x7F)
+            frame_start = 10 + tag_size + (10 if audio_data[5] & 0x10 else 0)
+        has_mpeg_frame = any(
+            audio_data[index] == 0xFF and audio_data[index + 1] & 0xE0 == 0xE0
+            for index in range(frame_start, min(len(audio_data) - 1, frame_start + 65536))
+        )
+        if not has_mpeg_frame:
+            raise HTTPException(status_code=422, detail="Choose a valid MP3 audio file")
+
+    os.makedirs(SOUNDBOARD_DIR, exist_ok=True)
+    existing_count = sum(1 for filename in os.listdir(SOUNDBOARD_DIR) if filename.lower().endswith((".wav", ".mp3")))
+    if existing_count >= 24:
+        raise HTTPException(status_code=409, detail="The soundboard can store up to 24 custom sounds")
+
+    sound_id = uuid.uuid4().hex
+    sound_path = os.path.join(SOUNDBOARD_DIR, f"{sound_id}{extension}")
+    name_path = os.path.join(SOUNDBOARD_DIR, f"{sound_id}.json")
+    try:
+        with open(sound_path, "wb") as sound_file:
+            sound_file.write(audio_data)
+        with open(name_path, "w", encoding="utf-8") as name_file:
+            json.dump({"name": name}, name_file, ensure_ascii=False)
+    except OSError as exc:
+        for path in (sound_path, name_path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        raise HTTPException(status_code=500, detail="Could not save the sound on this PC") from exc
+    return {"status": "ok", "sound": {"id": sound_id, "name": name}}
+
+
+@app.post("/api/soundboard/play", dependencies=[Depends(require_token)])
+def play_soundboard(data: SoundboardPayload):
+    try:
+        if data.sound_id in BUILTIN_SOUNDS:
+            winsound.MessageBeep(BUILTIN_SOUNDS[data.sound_id])
+        else:
+            sound_id = uuid.UUID(data.sound_id).hex
+            wav_path = os.path.join(SOUNDBOARD_DIR, f"{sound_id}.wav")
+            mp3_path = os.path.join(SOUNDBOARD_DIR, f"{sound_id}.mp3")
+            sound_path = wav_path if os.path.isfile(wav_path) else mp3_path
+            if not os.path.isfile(sound_path):
+                raise HTTPException(status_code=404, detail="That sound is not on the soundboard")
+            if sound_path.lower().endswith(".mp3"):
+                play_mp3_with_windows_media(sound_path)
+            else:
+                winsound.PlaySound(sound_path, winsound.SND_FILENAME | winsound.SND_ASYNC)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="Sound ID is not valid") from exc
+    except (OSError, RuntimeError) as exc:
+        raise HTTPException(status_code=502, detail="Windows could not play the sound") from exc
+    return {"status": "ok", "sound_id": data.sound_id}
+
+
+@app.post("/api/soundboard/delete", dependencies=[Depends(require_token)])
+def delete_soundboard_sound(data: SoundboardPayload):
+    try:
+        sound_id = uuid.UUID(data.sound_id).hex
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="Only uploaded sounds can be removed") from exc
+    sound_removed = False
+    try:
+        for extension in (".wav", ".mp3"):
+            path = os.path.join(SOUNDBOARD_DIR, f"{sound_id}{extension}")
+            try:
+                os.remove(path)
+                sound_removed = True
+            except FileNotFoundError:
+                pass
+        if not sound_removed:
+            raise HTTPException(status_code=404, detail="That sound is not on the soundboard")
+        try:
+            os.remove(os.path.join(SOUNDBOARD_DIR, f"{sound_id}.json"))
+        except FileNotFoundError:
+            pass
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail="Could not remove the sound from this PC") from exc
+    return {"status": "ok", "sound_id": sound_id}
+
+
+@app.post("/api/soundboard/rename", dependencies=[Depends(require_token)])
+def rename_soundboard_sound(data: SoundRenamePayload):
+    name = data.name.strip()
+    if not name or not all(character.isprintable() for character in name):
+        raise HTTPException(status_code=422, detail="Enter a printable sound name")
+    try:
+        sound_id = uuid.UUID(data.sound_id).hex
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="Only uploaded sounds can be renamed") from exc
+    wav_path = os.path.join(SOUNDBOARD_DIR, f"{sound_id}.wav")
+    mp3_path = os.path.join(SOUNDBOARD_DIR, f"{sound_id}.mp3")
+    if not os.path.isfile(wav_path) and not os.path.isfile(mp3_path):
+        raise HTTPException(status_code=404, detail="That sound is not on the soundboard")
+    name_path = os.path.join(SOUNDBOARD_DIR, f"{sound_id}.json")
+    try:
+        with open(name_path, "w", encoding="utf-8") as name_file:
+            json.dump({"name": name}, name_file, ensure_ascii=False)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail="Could not rename the sound") from exc
+    return {"status": "ok", "sound": {"id": sound_id, "name": name}}
 
 
 @app.post("/api/media", dependencies=[Depends(require_token)])
