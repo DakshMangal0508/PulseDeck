@@ -223,6 +223,11 @@ input:focus-visible {
 .discord-control-button svg { color: #c4b5fd; }
 .discord-control-active { border-color: rgba(251,113,133,.25); background: rgba(244,63,94,.09); color: #fecdd3; }
 .discord-control-active svg { color: #fda4af; }
+.deck-shell .discord-control-button:focus {
+  outline: 2px solid rgba(255, 255, 255, .45);
+  outline-offset: 2px;
+}
+.deck-shell[data-theme="light"] .discord-control-button:focus { outline-color: rgba(39, 39, 42, .55); }
 .discord-control-button:hover:not(:disabled) { transform: translateY(-1px); border-color: rgba(196,181,253,.35); background: rgba(139,92,246,.14); }
 .discord-control-button:disabled { cursor: not-allowed; opacity: .42; }
 .discord-voice-status { min-height: 0; margin-top: 10px; }
@@ -905,10 +910,10 @@ html[data-theme="light"] body { background: #e7ebff; }
   color: #873da0;
 }
 
-/* Dark mode uses the deep violet canvas with raised panels. */
-html:not([data-theme="light"]) body { background: #2a2356; }
+/* Dark mode uses the deep plum canvas with raised panels. */
+html:not([data-theme="light"]) body { background: #15011d; }
 .deck-shell:not([data-theme="light"]) {
-  background: #2a2356;
+  background: #15011d;
   background-image: none;
 }
 .deck-shell:not([data-theme="light"]) .surface-card,
@@ -1324,12 +1329,18 @@ html:not([data-theme="light"]) body { background: #2a2356; }
 .app-launcher-button:disabled { cursor: not-allowed; opacity: .45; }
 .app-launcher-button { position: relative; }
 .launcher-remove-icon { position: absolute; top: 3px; right: 3px; color: #fb7185 !important; }
-.launcher-add-wrap { position: relative; display: flex; min-height: 42px; align-items: center; justify-content: center; gap: 6px; overflow: hidden; border: 1px dashed rgba(255,255,255,.2); border-radius: 10px; color: #c9c9c3; font-size: 10px; font-weight: 600; }
-.launcher-add-wrap svg { color: #d7ff3f; }
-.launcher-add-wrap select { position: absolute; inset: 0; width: 100%; height: 100%; cursor: pointer; opacity: 0; }
+.launcher-add-wrap { position: relative; display: flex; min-height: 42px; align-items: center; justify-content: center; gap: 6px; overflow: hidden; border: 1px dashed rgba(255,61,0,.38); border-radius: 10px; background-color: rgba(255,61,0,.055); background-image: radial-gradient(circle at 1px 1px, rgba(255,255,255,.09) 1px, transparent 1.3px); background-size: 18px 18px; color: #e4e4e0; font-size: 10px; font-weight: 600; transition: border-color 150ms ease, background-color 150ms ease, color 150ms ease; }
+.launcher-add-wrap:hover { border-color: rgba(255,61,0,.62); background-color: rgba(255,61,0,.1); }
+.launcher-add-wrap svg { color: var(--deck-signal); }
+.launcher-add-wrap select { min-width: 0; height: 100%; flex: 1; border: 0; appearance: none; outline: none; background: transparent; color: inherit; font: inherit; text-align: center; cursor: pointer; }
+.launcher-add-wrap select { color-scheme: dark; }
+.launcher-add-wrap select option { background: #111214; color: #f4f4f5; font-family: "Segoe UI", Arial, sans-serif; font-size: 13px; font-weight: 600; }
 .deck-shell[data-theme="light"] .app-launcher-button { border-color: rgba(15,23,42,.1); background: rgba(15,23,42,.025); color: #292a2c; }
 .deck-shell[data-theme="light"] .launcher-edit-toggle { border-color: rgba(15,23,42,.12); color: #48494b; }
-.deck-shell[data-theme="light"] .launcher-add-wrap { border-color: rgba(15,23,42,.2); color: #48494b; }
+.deck-shell[data-theme="light"] .launcher-add-wrap { border-color: rgba(186,85,211,.38); background-color: rgba(186,85,211,.07); background-image: radial-gradient(circle at 1px 1px, rgba(39,39,42,.12) 1px, transparent 1.3px); color: #17131b; }
+.deck-shell[data-theme="light"] .launcher-add-wrap:hover { border-color: rgba(186,85,211,.62); background-color: rgba(186,85,211,.12); }
+.deck-shell[data-theme="light"] .launcher-add-wrap select { color-scheme: light; }
+.deck-shell[data-theme="light"] .launcher-add-wrap select option { background: #fff; color: #111 !important; font-family: "Segoe UI", Arial, sans-serif; font-size: 13px; font-weight: 600; }
 .soundboard-upload-row { display: flex; gap: 7px; margin-bottom: 10px; }
 .soundboard-name-input { min-width: 0; flex: 1; border: 1px solid rgba(255,255,255,.1); border-radius: 8px; outline: none; background: rgba(255,255,255,.025); padding: 7px 9px; color: #e4e4e0; font-size: 10px; }
 .soundboard-name-input:focus { border-color: rgba(215,255,63,.4); }
@@ -1532,6 +1543,21 @@ html:not([data-theme="light"]) body { background: #2a2356; }
 .deck-shell[data-theme="light"] .volume-range::-webkit-slider-thumb,
 .deck-shell[data-theme="light"] .volume-range::-moz-range-thumb { border-color: #0b1a12; }
 
+/* Keep Discord mute/deafen feedback visible after focus moves elsewhere. */
+.deck-shell .discord-control-button.discord-control-active {
+  border-color: rgba(255, 61, 0, .65);
+  background: rgba(255, 61, 0, .16);
+  color: #ffd2c7;
+  box-shadow: inset 0 0 0 1px rgba(255, 61, 0, .18), 0 0 14px rgba(255, 61, 0, .12);
+}
+.deck-shell .discord-control-button.discord-control-active svg { color: #ff7950; }
+.deck-shell[data-theme="light"] .discord-control-button.discord-control-active {
+  border-color: rgba(177, 39, 0, .55);
+  background: rgba(255, 61, 0, .12);
+  color: #741a00;
+}
+.deck-shell[data-theme="light"] .discord-control-button.discord-control-active svg { color: #b12700; }
+
 .deck-shell:not(.landscape-preview) .time-pane { align-self: start; height: var(--clock-pane-height, auto); }
 
 .deck-shell, .deck-shell * { font-family: "Doto", sans-serif; }
@@ -1581,14 +1607,14 @@ h1, h2, h3, h4, h5, h6, .section-title { font-family: "Silkscreen", sans-serif; 
   background: linear-gradient(90deg, rgba(11,26,18,.28), rgba(51,76,59,.18)) !important;
 }
 .deck-shell:not([data-theme="light"]) {
-  background-color: #2a2356;
+  background-color: #15011d;
   background-image:
     radial-gradient(ellipse at 12% 8%, rgba(255,61,0,.18), transparent 42%),
-    radial-gradient(ellipse at 88% 82%, rgba(111,84,190,.24), transparent 48%),
-    linear-gradient(135deg, #30285f 0%, #2a2356 48%, #201b45 100%);
+    radial-gradient(ellipse at 88% 82%, rgba(6,0,10,.22), transparent 48%),
+    linear-gradient(135deg, #15011d 0%, #15011d 48%, #15011d 100%);
   background-size: 150% 150%, 155% 155%, 220% 220%;
   background-position: 0% 0%, 100% 100%, 0% 50%;
-  animation: deck-gradient-drift 30s ease-in-out infinite alternate;
+  animation: none;
 }
 .deck-shell[data-theme="light"] {
   background-color: #d2ddff;
@@ -1598,7 +1624,7 @@ h1, h2, h3, h4, h5, h6, .section-title { font-family: "Silkscreen", sans-serif; 
     linear-gradient(135deg, #edf0ff 0%, #d2ddff 52%, #e2e9ff 100%);
   background-size: 155% 155%, 160% 160%, 220% 220%;
   background-position: 0% 0%, 100% 100%, 0% 50%;
-  animation: deck-gradient-drift 34s ease-in-out infinite alternate;
+  animation: none;
 }
 @keyframes deck-gradient-drift {
   0% { background-position: 0% 0%, 100% 100%, 0% 50%; }

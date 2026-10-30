@@ -22,7 +22,7 @@ class HotkeyPayload(Payload):
 
 
 class AppLaunchPayload(Payload):
-    app_id: str = Field(min_length=1, max_length=32)
+    app_id: str = Field(min_length=1, max_length=64)
 
 
 class MediaPayload(Payload):
@@ -31,7 +31,7 @@ class MediaPayload(Payload):
 
 
 class DiscordPayload(Payload):
-    action: Literal["mute", "deafen"]
+    action: Literal["mute", "deafen", "disconnect"]
 
 
 class VolumePayload(Payload):

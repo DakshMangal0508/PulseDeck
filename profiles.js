@@ -5,7 +5,7 @@ const PROFILES = {
     id: 'gaming',
     label: 'Gaming',
     app: 'Valorant.exe',
-    matchApps: ['valorant.exe', 'fc26.exe', 'fc27.exe', 'b1-win64-shipping.exe'],
+    matchApps: ['valorant.exe', 'valorant-win64-shipping.exe', 'fc26.exe', 'fc27.exe', 'b1-win64-shipping.exe'],
     icon: Gamepad2,
     accent: 'from-violet-500/20 via-fuchsia-500/10 to-transparent',
     macros: [

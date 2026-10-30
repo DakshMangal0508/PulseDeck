@@ -4,7 +4,7 @@ import PROFILES from './profiles.js';
 import TouchVolumePill from './VolumeControl.jsx';
 import {
   Activity, CalendarDays, Check, ChevronDown, ChevronRight, Clock3, Moon as MoonIcon,
-  Headphones, Mic, Pause, Play, Plus, RefreshCw, Shapes, SkipBack, SkipForward,
+  Headphones, Mic, Pause, PhoneOff, Play, Plus, RefreshCw, Shapes, SkipBack, SkipForward,
   Sun as SunIcon, Users, Volume2, Wifi, Pencil, Trash2, X, Save, Music2, Gamepad2,
   Globe2, Code2, Folder, FileText,
 } from 'lucide-react';
@@ -102,14 +102,14 @@ export default function PulseDeck() {
     try {
       const saved = JSON.parse(window.localStorage.getItem('pulsedeck-launcher-apps') || 'null');
       if (Array.isArray(saved)) {
-        const allowed = new Set(LAUNCHER_APPS.map((app) => app.id));
-        const selected = saved.filter((id, index) => allowed.has(id) && saved.indexOf(id) === index);
+        const selected = saved.filter((id, index) => typeof id === 'string' && saved.indexOf(id) === index);
         return selected;
       }
     } catch {}
     return ['spotify', 'discord', 'chrome', 'vscode', 'explorer', 'notepad'];
   });
   const [launcherEditing, setLauncherEditing] = useState(false);
+  const [appCatalog, setAppCatalog] = useState(LAUNCHER_APPS);
   const [activeProfile, setActiveProfile] = useState('photo');
   const [profileEditorOpen, setProfileEditorOpen] = useState(false);
   const [profileDraft, setProfileDraft] = useState(null);
@@ -135,6 +135,7 @@ export default function PulseDeck() {
   const [online, setOnline] = useState(false);
   const [discordAvailable, setDiscordAvailable] = useState(false);
   const [discordVoice, setDiscordVoice] = useState({ configured: false, connection: 'disabled', guild: null, channel: null, members: [] });
+  const [discordControlOverrides, setDiscordControlOverrides] = useState({ mute: null, deafen: null });
   const [toast, setToast] = useState('Connecting to PC…');
   const [volumes, setVolumes] = useState({ apps: [], master: null });
   const [customSounds, setCustomSounds] = useState([]);
@@ -156,6 +157,7 @@ export default function PulseDeck() {
   const volumeRevisions = useRef({});
   const pendingPlayback = useRef(null);
   const pendingSeek = useRef(null);
+  const discordControlRevisions = useRef({ mute: 0, deafen: 0 });
   const seekTimer = useRef(null);
   const volumeMixerRef = useRef(null);
   const clockPaneRef = useRef(null);
@@ -172,8 +174,18 @@ export default function PulseDeck() {
   const seekMax = Math.max(seekMin, Math.min(mediaTimeline.duration, mediaTimeline.seekMax || mediaTimeline.duration));
   const displayedSeekPosition = Math.max(seekMin, Math.min(seekMax, currentPosition));
   const discordSelfVoice = discordVoice.members.find((member) => member.is_self);
-  const discordMicMuted = discordSelfVoice ? discordSelfVoice.self_muted || discordSelfVoice.server_muted : null;
-  const discordDeafened = discordSelfVoice ? discordSelfVoice.self_deafened || discordSelfVoice.server_deafened : null;
+  const observedDiscordMicMuted = discordSelfVoice ? discordSelfVoice.self_muted || discordSelfVoice.server_muted : null;
+  const observedDiscordDeafened = discordSelfVoice ? discordSelfVoice.self_deafened || discordSelfVoice.server_deafened : null;
+  const discordMicMuted = discordControlOverrides.mute ?? observedDiscordMicMuted;
+  const discordDeafened = discordControlOverrides.deafen ?? observedDiscordDeafened;
+
+  useEffect(() => {
+    if (!discordSelfVoice) return;
+    setDiscordControlOverrides((current) => ({
+      mute: current.mute === observedDiscordMicMuted ? null : current.mute,
+      deafen: current.deafen === observedDiscordDeafened ? null : current.deafen,
+    }));
+  }, [discordSelfVoice?.self_muted, discordSelfVoice?.server_muted, discordSelfVoice?.self_deafened, discordSelfVoice?.server_deafened]);
 
   useEffect(() => {
     let active = true;
@@ -345,6 +357,15 @@ export default function PulseDeck() {
   }, [online]);
 
   useEffect(() => {
+    if (!online) return undefined;
+    let active = true;
+    apiRequest('/api/apps').then((data) => {
+      if (active && Array.isArray(data.apps)) setAppCatalog(data.apps);
+    }).catch(() => {});
+    return () => { active = false; };
+  }, [online]);
+
+  useEffect(() => {
     try { window.localStorage.setItem('pulsedeck-visible-builtin-sounds', JSON.stringify(visibleBuiltinSoundIds)); }
     catch { /* Keep preset visibility in memory if local storage is unavailable. */ }
   }, [visibleBuiltinSoundIds]);
@@ -386,6 +407,8 @@ export default function PulseDeck() {
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
+    const themeColor = document.querySelector('meta[name="theme-color"]');
+    if (themeColor) themeColor.content = theme === 'light' ? '#d2ddff' : '#15011d';
     try { window.localStorage.setItem('pulsedeck-theme', theme); } catch { /* Keep the in-memory theme. */ }
   }, [theme]);
 
@@ -575,7 +598,17 @@ export default function PulseDeck() {
   const handleDiscord = (action, label) => {
     if (navigator.vibrate) navigator.vibrate(15);
     setToast(label);
-    triggerBackend('/api/discord', { action });
+    const control = action === 'mute' || action === 'deafen' ? action : null;
+    const revision = control ? ++discordControlRevisions.current[control] : null;
+    if (control) {
+      const currentValue = control === 'mute' ? discordMicMuted : discordDeafened;
+      setDiscordControlOverrides((current) => ({ ...current, [control]: !Boolean(currentValue) }));
+    }
+    triggerBackend('/api/discord', { action }).then((ok) => {
+      if (!ok && control && discordControlRevisions.current[control] === revision) {
+        setDiscordControlOverrides((current) => ({ ...current, [control]: null }));
+      }
+    });
   };
 
   const handleVolume = (target, val) => {
@@ -611,7 +644,7 @@ export default function PulseDeck() {
   const frameWidth = 'max-w-[1440px]';
 
   return (
-    <main data-theme={theme} data-reduced-motion={reduceMotion} className="deck-shell min-h-screen overflow-hidden px-3 py-4 text-zinc-100 sm:px-6 sm:py-6 lg:px-10 lg:py-8">
+    <main data-theme={theme} data-reduced-motion={reduceMotion} className="deck-shell min-h-screen overflow-x-clip px-3 py-4 text-zinc-100 sm:px-6 sm:py-6 lg:px-10 lg:py-8">
       <div className="deck-orb deck-orb-one" />
       <div className="deck-orb deck-orb-two" />
       <div className={`deck-content relative z-10 mx-auto flex min-h-[calc(100vh-2rem)] w-full flex-col ${frameWidth}`}>
@@ -960,7 +993,11 @@ export default function PulseDeck() {
                     <button
                       type="button"
                       key={macro.id}
-                      onClick={() => fireMacro(macro)}
+                      onClick={(event) => {
+                        fireMacro(macro);
+                        // Clear the browser's pressed/focus styling after a pointer activation.
+                        if (event.detail > 0) event.currentTarget.blur();
+                      }}
                       className="macro-card group"
                       style={{ '--macro-delay': `${index * 35}ms` }}
                     >
@@ -983,9 +1020,10 @@ export default function PulseDeck() {
               </div>
               <div className="app-launcher-grid">
                 {launcherApps.map((id) => {
-                  const app = LAUNCHER_APPS.find((item) => item.id === id);
+                  const app = appCatalog.find((item) => item.id === id);
                   if (!app) return null;
-                  const { label, Icon } = app;
+                  const label = app.label || id;
+                  const Icon = app.Icon || LAUNCHER_APPS.find((item) => item.id === id)?.Icon || Shapes;
                   return (
                   <button type="button" key={id} className="app-launcher-button" onClick={() => launcherEditing ? saveLauncherApps(launcherApps.filter((appId) => appId !== id)) : launchApp({ id, label })} disabled={!launcherEditing && !online} aria-label={launcherEditing ? `Remove ${label}` : `Open ${label} on your PC`} title={launcherEditing ? `Remove ${label}` : `Open ${label}`}>
                     <Icon className="h-4 w-4" aria-hidden="true" />
@@ -993,13 +1031,12 @@ export default function PulseDeck() {
                     {launcherEditing && <X className="launcher-remove-icon h-3 w-3" aria-hidden="true" />}
                   </button>
                 ); })}
-                {launcherEditing && launcherApps.length < LAUNCHER_APPS.length && (
+                {launcherEditing && launcherApps.length < appCatalog.length && (
                   <label className="launcher-add-wrap">
                     <Plus className="h-4 w-4" aria-hidden="true" />
-                    <span>Add app</span>
                     <select aria-label="Add an app" value="" onChange={(event) => event.target.value && saveLauncherApps([...launcherApps, event.target.value])}>
-                      <option value="" disabled>Choose app</option>
-                      {LAUNCHER_APPS.filter((app) => !launcherApps.includes(app.id)).map((app) => <option key={app.id} value={app.id}>{app.label}</option>)}
+                      <option value="" disabled>Add app</option>
+                      {appCatalog.filter((app) => !launcherApps.includes(app.id)).map((app) => <option key={app.id} value={app.id}>{app.label}</option>)}
                     </select>
                   </label>
                 )}
@@ -1019,16 +1056,25 @@ export default function PulseDeck() {
                 <span className={`tiny-label ${discordAvailable ? 'discord-ready' : ''}`}>{discordAvailable ? 'READY' : 'OFFLINE'}</span>
               </div>
               <div className="discord-controls grid grid-cols-2 gap-2">
-                <button type="button" className={`discord-control-button ${discordMicMuted ? 'discord-control-active' : ''}`} aria-pressed={discordMicMuted ?? undefined} disabled={!online || !discordAvailable || Boolean(discordSelfVoice?.server_muted)} onClick={() => handleDiscord('mute', 'Discord · Toggle microphone mute')}>
+                <button type="button" className={`discord-control-button ${discordMicMuted || discordDeafened ? 'discord-control-active' : ''}`} aria-pressed={discordMicMuted || discordDeafened || undefined} disabled={!online || !discordAvailable || Boolean(discordSelfVoice?.server_muted)} onClick={() => handleDiscord('mute', 'Discord · Toggle microphone mute')}>
                   <Mic className="h-4 w-4" /><span>{discordSelfVoice?.server_muted ? 'Server muted' : discordMicMuted === null ? 'Toggle mute' : discordMicMuted ? 'Unmute mic' : 'Mute mic'}</span>
                 </button>
                 <button type="button" className={`discord-control-button ${discordDeafened ? 'discord-control-active' : ''}`} aria-pressed={discordDeafened ?? undefined} disabled={!online || !discordAvailable || Boolean(discordSelfVoice?.server_deafened)} onClick={() => handleDiscord('deafen', 'Discord · Toggle deafen')}>
                   <Headphones className="h-4 w-4" /><span>{discordSelfVoice?.server_deafened ? 'Server deafened' : discordDeafened === null ? 'Toggle deafen' : discordDeafened ? 'Undeafen' : 'Deafen'}</span>
                 </button>
               </div>
+              <button
+                type="button"
+                className="discord-control-button mt-2 w-full"
+                disabled={!online || !discordVoice.configured || !discordVoice.channel}
+                onClick={() => handleDiscord('disconnect', 'Disconnecting from Discord voice')}
+              >
+                <PhoneOff className="h-4 w-4" />
+                <span>{discordVoice.channel ? `Disconnect from ${discordVoice.channel}` : 'Disconnect from voice'}</span>
+              </button>
               <div className="discord-voice-status" aria-live="polite">
                 {!discordVoice.configured ? (
-                  null
+                  <p className="discord-empty-state">Set up the optional Discord bot to enable voice channel controls.</p>
                 ) : discordVoice.connection === 'error' ? (
                   <p className="discord-empty-state">Discord monitor could not connect. Check the bot token and enabled intents.</p>
                 ) : discordVoice.connection !== 'connected' ? (

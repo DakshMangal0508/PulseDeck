@@ -52,7 +52,11 @@ from validation import (
 )
 
 
-DISCORD_BOT_TOKEN = os.getenv("PULSEDECK_DISCORD_BOT_TOKEN", "").strip()
+DISCORD_BOT_TOKEN = "".join(
+    character
+    for character in os.getenv("PULSEDECK_DISCORD_BOT_TOKEN", "")
+    if not character.isspace() and ord(character) >= 32 and ord(character) != 127
+)
 DISCORD_USER_ID_VALUE = os.getenv("PULSEDECK_DISCORD_USER_ID", "").strip()
 DISCORD_USER_ID = int(DISCORD_USER_ID_VALUE) if DISCORD_USER_ID_VALUE.isdecimal() else None
 DISCORD_VOICE_STATUS = {
@@ -121,7 +125,7 @@ async def lifespan(_app):
         intents.voice_states = True
         DISCORD_BOT = discord.Client(
             intents=intents,
-            member_cache_flags=discord.MemberCacheFlags.voice(),
+            member_cache_flags=discord.MemberCacheFlags(voice=True),
         )
 
         @DISCORD_BOT.event
@@ -380,6 +384,32 @@ def resolve_launcher_executable(app_id: str) -> str | None:
             except (OSError, ValueError):
                 continue
     return None
+
+
+def discover_start_menu_apps():
+    """Return launchable shortcuts from the current and common Windows Start Menus."""
+    roots = {
+        os.path.join(os.environ.get("APPDATA", ""), "Microsoft", "Windows", "Start Menu", "Programs"),
+        os.path.join(os.environ.get("PROGRAMDATA", "C:\\ProgramData"), "Microsoft", "Windows", "Start Menu", "Programs"),
+    }
+    apps = []
+    seen = set()
+    for root in roots:
+        if not os.path.isdir(root):
+            continue
+        for directory, _, filenames in os.walk(root):
+            for filename in filenames:
+                if not filename.lower().endswith((".lnk", ".url")):
+                    continue
+                shortcut = os.path.abspath(os.path.join(directory, filename))
+                normalized = os.path.normcase(shortcut)
+                if normalized in seen:
+                    continue
+                seen.add(normalized)
+                app_id = "shortcut-" + hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:32]
+                apps.append({"id": app_id, "label": os.path.splitext(filename)[0], "shortcut": shortcut})
+    apps.sort(key=lambda item: item["label"].casefold())
+    return apps
 
 
 def require_token(x_api_token: str | None = Header(default=None)):
@@ -736,11 +766,25 @@ def trigger_hotkey(data: HotkeyPayload):
     return {"status": "ok", "shortcut": shortcut}
 
 
+@app.get("/api/apps", dependencies=[Depends(require_token)])
+def list_apps():
+    apps = [{"id": app_id, "label": launcher["label"]} for app_id, launcher in APP_LAUNCHERS.items()]
+    apps.extend({"id": app["id"], "label": app["label"]} for app in discover_start_menu_apps())
+    return {"apps": apps}
+
+
 @app.post("/api/apps/open", dependencies=[Depends(require_token)])
 def open_app(data: AppLaunchPayload):
     launcher = APP_LAUNCHERS.get(data.app_id)
     if not launcher:
-        raise HTTPException(status_code=422, detail="App is not in the launch allowlist")
+        shortcut = next((item for item in discover_start_menu_apps() if item["id"] == data.app_id), None)
+        if not shortcut:
+            raise HTTPException(status_code=422, detail="App is not available in the Start Menu")
+        try:
+            os.startfile(shortcut["shortcut"])
+        except OSError as exc:
+            raise HTTPException(status_code=502, detail=f"Windows could not open {shortcut['label']}") from exc
+        return {"status": "ok", "app_id": data.app_id}
     try:
         protocol = launcher.get("protocol")
         if protocol:
@@ -948,13 +992,46 @@ def trigger_media(data: MediaPayload):
 
 @app.post("/api/discord", dependencies=[Depends(require_token)])
 def trigger_discord(data: DiscordPayload):
+    if data.action == "disconnect":
+        if not DISCORD_VOICE_STATUS["configured"] or DISCORD_BOT is None or not DISCORD_BOT.is_ready():
+            raise HTTPException(status_code=409, detail="Discord voice status bot is not connected")
+        if DISCORD_USER_ID is None:
+            raise HTTPException(status_code=409, detail="Discord user ID is not configured")
+
+        async def disconnect_user():
+            for guild in DISCORD_BOT.guilds:
+                member = guild.get_member(DISCORD_USER_ID)
+                if member and member.voice and member.voice.channel:
+                    if not member.voice.channel.permissions_for(guild.me).move_members:
+                        raise PermissionError("The Discord bot needs Move Members permission in this server")
+                    await member.move_to(None, reason="Disconnected by PulseDeck")
+                    return True
+            return False
+
+        try:
+            disconnected = asyncio.run_coroutine_threadsafe(
+                disconnect_user(), DISCORD_BOT.loop
+            ).result(timeout=8)
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail="Discord could not disconnect you from voice") from exc
+        if not disconnected:
+            raise HTTPException(status_code=409, detail="You are no longer in a server voice channel")
+        return {"status": "ok", "action": "disconnect"}
+
     if not is_discord_running():
         raise HTTPException(status_code=409, detail="Discord is not running on the host PC")
-    shortcut = "ctrl+shift+m" if data.action == "mute" else "ctrl+shift+d"
+    shortcut = "caps lock+tab" if data.action == "mute" else "ctrl+alt+shift+f11"
+    caps_lock_was_on = bool(ctypes.windll.user32.GetKeyState(0x14) & 1) if data.action == "mute" else None
     try:
         keyboard.send(shortcut)
     except Exception as exc:
         raise HTTPException(status_code=502, detail="Windows could not send the Discord hotkey") from exc
+    finally:
+        caps_lock_is_on = bool(ctypes.windll.user32.GetKeyState(0x14) & 1) if data.action == "mute" else None
+        if data.action == "mute" and caps_lock_is_on != caps_lock_was_on:
+            keyboard.send("caps lock")
     return {"status": "ok", "action": data.action, "shortcut": shortcut}
 
 
