@@ -1,9 +1,0 @@
-{
-  "appId": "com.pulsedeck.app",
-  "appName": "PulseDeck",
-  "webDir": "dist",
-  "server": {
-    "androidScheme": "http",
-    "cleartext": true
-  }
-}

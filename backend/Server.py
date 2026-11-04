@@ -13,7 +13,6 @@ import sqlite3
 import smtplib
 import struct
 import subprocess
-import sys
 import threading
 import time
 import urllib.parse
@@ -44,10 +43,6 @@ from winrt.windows.media.control import GlobalSystemMediaTransportControlsSessio
 from winrt.windows.media.control import GlobalSystemMediaTransportControlsSessionPlaybackStatus
 from winrt.windows.storage.streams import Buffer, DataReader, InputStreamOptions
 
-BACKEND_DIR = os.path.dirname(
-    sys.executable if getattr(sys, "frozen", False) else os.path.abspath(__file__)
-)
-
 try:
     import discord
 except ImportError:
@@ -70,7 +65,7 @@ from validation import (
 
 def load_backend_env():
     """Load local backend settings without overriding process environment."""
-    env_path = os.path.join(BACKEND_DIR, ".env")
+    env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
     try:
         with open(env_path, "r", encoding="utf-8-sig") as env_file:
             for line in env_file:
@@ -316,9 +311,6 @@ def auth_db():
         )
         connection.execute(
             "CREATE TABLE IF NOT EXISTS account_recovery_tokens (token_hash TEXT PRIMARY KEY, account_id INTEGER NOT NULL, purpose TEXT NOT NULL, email TEXT, created_at REAL NOT NULL, expires_at REAL NOT NULL)"
-        )
-        connection.execute(
-            "CREATE TABLE IF NOT EXISTS account_preferences (username TEXT PRIMARY KEY, profiles_json TEXT NOT NULL, updated_at REAL NOT NULL)"
         )
         session_columns = {row[1] for row in connection.execute("PRAGMA table_info(api_sessions)")}
         if "session_type" not in session_columns:
@@ -772,7 +764,7 @@ ALLOWED_ORIGINS = [
     origin.strip()
     for origin in os.getenv(
         "PULSEDECK_ALLOWED_ORIGINS",
-        "http://localhost,http://localhost:5173,http://127.0.0.1:5173",
+        "http://localhost:5173,http://127.0.0.1:5173",
     ).split(",")
     if origin.strip()
 ]
@@ -781,10 +773,11 @@ app = FastAPI(title="PulseDeck Host Server", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
-    allow_methods=["GET", "POST", "PUT"],
+    allow_methods=["GET", "POST"],
     allow_headers=["Content-Type", "X-API-Token"],
 )
 
+BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
 FRONTEND_DIR = os.path.abspath(os.getenv(
     "PULSEDECK_FRONTEND_DIR",
     os.path.join(BACKEND_DIR, "..", "frontend", "dist"),
@@ -845,39 +838,6 @@ def require_token(request: Request, x_api_token: str | None = Header(default=Non
         if API_TOKEN and hmac.compare_digest(x_api_token, API_TOKEN):
             return "legacy"
     raise HTTPException(status_code=401, detail="Sign in to control this PC")
-
-
-@app.get("/api/preferences")
-def get_preferences(username: str = Depends(require_token)):
-    with auth_db() as connection:
-        row = connection.execute(
-            "SELECT profiles_json FROM account_preferences WHERE username = ?", (username,)
-        ).fetchone()
-    if not row:
-        return {"profiles": None}
-    try:
-        profiles = json.loads(row[0])
-    except (TypeError, json.JSONDecodeError):
-        profiles = None
-    return {"profiles": profiles if isinstance(profiles, list) else None}
-
-
-class PreferencesPayload(BaseModel):
-    profiles: list[dict] = Field(max_length=100)
-
-
-@app.put("/api/preferences")
-def save_preferences(payload: PreferencesPayload, username: str = Depends(require_token)):
-    serialized = json.dumps(payload.profiles, ensure_ascii=False, separators=(",", ":"))
-    if len(serialized.encode("utf-8")) > 512_000:
-        raise HTTPException(status_code=413, detail="Shortcut profiles are too large")
-    with auth_db() as connection:
-        connection.execute(
-            "INSERT INTO account_preferences (username, profiles_json, updated_at) VALUES (?, ?, ?) "
-            "ON CONFLICT(username) DO UPDATE SET profiles_json = excluded.profiles_json, updated_at = excluded.updated_at",
-            (username, serialized, time.time()),
-        )
-    return {"saved": True}
 
 
 @app.get("/", include_in_schema=False)
@@ -1670,7 +1630,7 @@ def audio_session_key(session) -> str:
 
 
 def get_session_volumes():
-    sessions_by_process = {}
+    apps = []
     master_level = None
     CoInitialize()
     try:
@@ -1681,16 +1641,20 @@ def get_session_volumes():
                 process_name = session.Process.name().lower()
                 if process_name in {"audiodg.exe", "system"}:
                     continue
-                # Windows keeps audio sessions for many background apps after they
-                # stop producing sound. Keep those sessions in the mixer so their
-                # volume controls do not disappear as soon as playback pauses.
+                # Keep Spotify available in the mixer while paused; its Windows session
+                # often remains present but transitions to the inactive state.
+                if session.State != 1 and process_name != "spotify.exe":
+                    continue
                 name = APP_DISPLAY_NAMES.get(
                     process_name,
                     os.path.splitext(os.path.basename(process_name))[0].replace("_", " ").title(),
                 )
-                group = sessions_by_process.setdefault(process_name, {"name": name, "ids": [], "volumes": []})
-                group["ids"].append(audio_session_key(session))
-                group["volumes"].append(session.SimpleAudioVolume.GetMasterVolume())
+                apps.append({
+                    "id": audio_session_key(session),
+                    "name": name,
+                    "process": process_name,
+                    "volume": round(session.SimpleAudioVolume.GetMasterVolume(), 3),
+                })
             except Exception:
                 # A stale or inaccessible session should not hide other sessions.
                 continue
@@ -1702,35 +1666,23 @@ def get_session_volumes():
             pass
     finally:
         CoUninitialize()
-    apps = [
-        {
-            "id": ",".join(sorted(group["ids"])),
-            "name": group["name"],
-            "process": process_name,
-            "volume": round(sum(group["volumes"]) / len(group["volumes"]), 3),
-        }
-        for process_name, group in sessions_by_process.items()
-        if group["ids"]
-    ]
     return {"apps": apps, "master": master_level}
 
 
 def set_session_volume(session_id: str, level: float) -> bool:
     level = max(0.0, min(1.0, level))
-    session_ids = set(session_id.split(","))
-    updated = False
     CoInitialize()
     try:
         for session in AudioUtilities.GetAllSessions():
             try:
-                if audio_session_key(session) in session_ids:
+                if hmac.compare_digest(audio_session_key(session), session_id):
                     session.SimpleAudioVolume.SetMasterVolume(level, None)
-                    updated = True
+                    return True
             except Exception:
                 continue
     finally:
         CoUninitialize()
-    return updated
+    return False
 
 
 def set_master_volume(level: float):

@@ -2,7 +2,6 @@
 venv/
 node_modules/
 dist/
-build/
 __pycache__/
 *.py[cod]
 *.log
@@ -11,4 +10,3 @@ __pycache__/
 !.env.example
 .pytest_cache/
 .coverage
-release/

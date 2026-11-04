@@ -7,13 +7,9 @@
     "dev": "vite",
     "build": "vite build --configLoader runner",
     "preview": "vite preview",
-    "android:sync": "npm run build && cap sync android",
-    "android:open": "cap open android",
     "check": "npm run build && python -m unittest discover -s ../backend/tests"
   },
   "dependencies": {
-    "@capacitor/android": "^8.6.0",
-    "@capacitor/core": "^8.6.0",
     "@phosphor-icons/react": "^2.1.10",
     "lucide-react": "^0.468.0",
     "motion": "^14.9.1",
@@ -22,7 +18,6 @@
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
-    "@capacitor/cli": "^8.6.0",
     "@vitejs/plugin-react": "^4.3.4",
     "autoprefixer": "^10.4.20",
     "postcss": "^8.4.49",
