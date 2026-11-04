@@ -1,7 +1,11 @@
 $ErrorActionPreference = 'Stop'
 
-$projectRoot = $PSScriptRoot
-$python = Join-Path $projectRoot '.venv\Scripts\python.exe'
+$backendRoot = $PSScriptRoot
+$workspaceRoot = Split-Path -Parent $backendRoot
+$python = Join-Path $workspaceRoot '.venv\Scripts\python.exe'
+if (-not (Test-Path -LiteralPath $python)) {
+    $python = Join-Path $backendRoot '.venv\Scripts\python.exe'
+}
 
 if (-not (Test-Path -LiteralPath $python)) {
     throw "PulseDeck's virtual environment was not found. Run the setup commands in README.md first."
@@ -16,9 +20,9 @@ if ($listener) {
 
 Start-Process -FilePath $python `
     -ArgumentList 'Server.py' `
-    -WorkingDirectory $projectRoot `
+    -WorkingDirectory $backendRoot `
     -WindowStyle Hidden `
-    -RedirectStandardOutput (Join-Path $projectRoot 'backend.log') `
-    -RedirectStandardError (Join-Path $projectRoot 'backend-error.log')
+    -RedirectStandardOutput (Join-Path $backendRoot 'backend.log') `
+    -RedirectStandardError (Join-Path $backendRoot 'backend-error.log')
 
 Write-Output 'PulseDeck started in the background at http://localhost:8000.'

@@ -1,11 +1,15 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { apiRequest, authRequest, clearAccountSession, getAccountUsername, getApiToken, saveAccountSession } from './api.js';
+import { AnimatePresence, motion } from 'motion/react';
+import SpringButton from './SpringButton.jsx';
+import { API_BASE, apiRequest, clearAccountSession, getApiToken } from './api.js';
+import { QRCodeSVG } from 'qrcode.react';
 import PROFILES from './profiles.js';
 import TouchVolumePill from './VolumeControl.jsx';
+import SportsScores from './SportsScores.jsx';
 import {
-  Activity, CalendarDays, Check, ChevronDown, ChevronRight, Clock3, Moon as MoonIcon,
-  Headphones, Mic, Pause, PhoneOff, Play, Plus, RefreshCw, Shapes, SkipBack, SkipForward,
-  Sun as SunIcon, Users, Volume2, Wifi, Pencil, Trash2, X, Save, Music2, Gamepad2,
+  Activity, CalendarDays, Check, ChevronDown, ChevronRight, Clock3, LoaderCircle,
+  Headphones, Mic, Pause, Play, Plus, RefreshCw, Shapes, SkipBack, SkipForward,
+  Users, Volume2, Wifi, Pencil, Trash2, X, Save, Music2, Gamepad2,
   Globe2, Code2, Folder, FileText,
 } from 'lucide-react';
 import {
@@ -39,6 +43,11 @@ const SAFE_SHORTCUTS = [
   ['ctrl+shift+g', 'Ctrl + Shift + G'], ['ctrl+shift+p', 'Ctrl + Shift + P'], ['ctrl+s', 'Ctrl + S'],
   ['duck_spotify', 'Duck Spotify to 15%'],
 ];
+function formatShortcutLabel(shortcut) {
+  const formatKey = (part) => part === 'windows' ? 'Win' : part === 'ctrl' ? 'Ctrl' : part.charAt(0).toUpperCase() + part.slice(1);
+  return SAFE_SHORTCUTS.find(([value]) => value === shortcut)?.[1]
+    || shortcut.split(',').map((chord) => chord.trim().split('+').map(formatKey).join(' + ')).join(' → ');
+}
 
 function loadProfiles() {
   const defaults = Object.values(PROFILES);
@@ -50,7 +59,7 @@ function loadProfiles() {
       const custom = savedById.get(base.id);
       savedById.delete(base.id);
       if (!custom) return base;
-      const customMacros = Array.isArray(custom.macros) ? custom.macros.slice(0, 3) : [];
+      const customMacros = Array.isArray(custom.macros) ? custom.macros : [];
       return { ...base, ...custom, icon: base.icon, macros: customMacros.map((macro) => ({
         ...base.macros.find((item) => item.id === macro.id), ...macro,
         icon: base.macros.find((item) => item.id === macro.id)?.icon || Shapes,
@@ -58,13 +67,14 @@ function loadProfiles() {
     });
     savedById.forEach((item) => {
       if (!item || typeof item.label !== 'string' || !Array.isArray(item.macros)) return;
-      merged.push({ ...item, icon: Shapes, macros: item.macros.slice(0, 3).map((macro) => ({ ...macro, icon: Shapes })) });
+      merged.push({ ...item, icon: Shapes, macros: item.macros.map((macro) => ({ ...macro, icon: Shapes })) });
     });
     return merged;
   } catch { return defaults; }
 }
 
 const PHOSPHOR_PROFILE_ICONS = {
+  windows: Globe2,
   gaming: GameController,
   photo: SlidersHorizontal,
   dev: TerminalWindow,
@@ -96,6 +106,24 @@ const formatMediaTime = (seconds) => {
   return `${minutes}:${String(remainingSeconds).padStart(2, '0')}`;
 };
 
+const WAVEFORM_PEAKS = [0.42, 0.76, 0.58, 1, 0.48, 0.86, 0.62, 0.94, 0.4];
+function AudioWaveform({ active }) {
+  return (
+    <div className={`audio-waveform${active ? ' is-active' : ''}`} aria-hidden="true">
+      {WAVEFORM_PEAKS.map((peak, index) => (
+        <motion.span
+          key={index}
+          animate={{ scaleY: active ? [0.16, peak, Math.max(0.24, peak * 0.48), 0.16] : 0.12 }}
+          transition={active
+            ? { duration: 0.72 + (index % 4) * 0.13, delay: index * 0.045, repeat: Infinity, ease: 'easeInOut' }
+            : { type: 'spring', stiffness: 380, damping: 26 }}
+          style={{ transformOrigin: '50% 100%' }}
+        />
+      ))}
+    </div>
+  );
+}
+
 export default function PulseDeck() {
   const [profiles, setProfiles] = useState(loadProfiles);
   const [launcherApps, setLauncherApps] = useState(() => {
@@ -110,33 +138,30 @@ export default function PulseDeck() {
   });
   const [launcherEditing, setLauncherEditing] = useState(false);
   const [appCatalog, setAppCatalog] = useState(LAUNCHER_APPS);
-  const [activeProfile, setActiveProfile] = useState('photo');
+  const [activeProfile, setActiveProfile] = useState('windows');
   const [profileEditorOpen, setProfileEditorOpen] = useState(false);
   const [profileDraft, setProfileDraft] = useState(null);
+  const [recordingShortcutIndex, setRecordingShortcutIndex] = useState(null);
+  const [recordWinModifier, setRecordWinModifier] = useState(false);
   const [autoSwitch, setAutoSwitch] = useState(true);
   const [showConnection, setShowConnection] = useState(() => !getApiToken());
-  const [accountConfigured, setAccountConfigured] = useState(null);
-  const [accountUsername, setAccountUsername] = useState(getAccountUsername);
-  const [accountPassword, setAccountPassword] = useState('');
-  const [authBusy, setAuthBusy] = useState(false);
-  const [theme, setTheme] = useState(() => {
-    try { return window.localStorage.getItem('pulsedeck-theme') === 'light' ? 'light' : 'dark'; }
-    catch { return 'dark'; }
-  });
-  const [reduceMotion, setReduceMotion] = useState(() => {
-    try { return window.localStorage.getItem('pulsedeck-reduced-motion') === 'true'; }
-    catch { return false; }
-  });
+  const [connectionUrls, setConnectionUrls] = useState([]);
   const iconPack = 'phosphor';
   const [clockNow, setClockNow] = useState(() => new Date());
   const [isPlaying, setIsPlaying] = useState(null);
   const [track, setTrack] = useState({ title: 'Waiting for Spotify', artist: 'Open Spotify on your PC', artwork: '' });
+  const [spotifyConnection, setSpotifyConnection] = useState({ configured: false, connected: false });
   const [mediaTimeline, setMediaTimeline] = useState({ position: 0, duration: 0, seekMin: 0, seekMax: 0, seekable: false, updatedAt: Date.now() });
   const [online, setOnline] = useState(false);
   const [discordAvailable, setDiscordAvailable] = useState(false);
   const [discordVoice, setDiscordVoice] = useState({ configured: false, connection: 'disabled', guild: null, channel: null, members: [] });
+  const [discordRpc, setDiscordRpc] = useState({ configured: false, connected: false, username: null, mute: null, deaf: null, channel: null, error: null });
+  const [discordRpcConnecting, setDiscordRpcConnecting] = useState(false);
+  const [discordRpcConnectError, setDiscordRpcConnectError] = useState('');
   const [discordControlOverrides, setDiscordControlOverrides] = useState({ mute: null, deafen: null });
   const [toast, setToast] = useState('Connecting to PC…');
+  const [busyMacroId, setBusyMacroId] = useState(null);
+
   const [volumes, setVolumes] = useState({ apps: [], master: null });
   const [customSounds, setCustomSounds] = useState([]);
   const [soundNameDraft, setSoundNameDraft] = useState('');
@@ -159,11 +184,65 @@ export default function PulseDeck() {
   const pendingSeek = useRef(null);
   const discordControlRevisions = useRef({ mute: 0, deafen: 0 });
   const seekTimer = useRef(null);
-  const volumeMixerRef = useRef(null);
-  const clockPaneRef = useRef(null);
 
-  const profile = profiles.find((item) => item.id === activeProfile) || profiles[0] || PROFILES.photo;
-  const layoutClass = 'grid-cols-1 lg:grid-cols-[minmax(280px,0.9fr)_minmax(175px,0.55fr)_minmax(0,1.4fr)]';
+  useEffect(() => {
+    if (!apiToken) window.location.replace('/account');
+  }, [apiToken]);
+
+  useEffect(() => {
+    const result = new URLSearchParams(window.location.search).get('spotify');
+    if (!result) return;
+    setToast(result === 'connected' ? 'Spotify connected' : result === 'denied' ? 'Spotify connection cancelled' : 'Spotify connection failed');
+    window.history.replaceState({}, '', `${window.location.pathname}${window.location.hash}`);
+  }, []);
+
+  useEffect(() => {
+    if (!showConnection) return undefined;
+    let active = true;
+    let fetching = false;
+    let serverInstanceId = null;
+    let pairingCode = '';
+    let pairingCodeRefreshAt = 0;
+    const refreshPairingCode = async () => {
+      if (!apiToken) {
+        setConnectionUrls([]);
+        return;
+      }
+      if (fetching) return;
+      fetching = true;
+      try {
+        const addressesResponse = await fetch(`${API_BASE}/api/connect-info`, { cache: 'no-store' });
+        if (!addressesResponse.ok) throw new Error('Could not get connection addresses');
+        const addresses = await addressesResponse.json();
+        const serverRestarted = serverInstanceId !== null && serverInstanceId !== addresses.server_instance_id;
+        serverInstanceId = addresses.server_instance_id;
+        if (!pairingCode || serverRestarted || Date.now() >= pairingCodeRefreshAt) {
+          const pairing = await apiRequest('/api/auth/pairing', { method: 'POST', body: {} });
+          pairingCode = pairing.code;
+          pairingCodeRefreshAt = Date.now() + 300_000;
+        }
+        if (active) {
+          setConnectionUrls((addresses.urls || []).map((url) => ({
+            url,
+            pairingUrl: `${url}/#pair=${encodeURIComponent(pairingCode)}`,
+          })));
+        }
+      } catch {
+        if (active) setConnectionUrls([]);
+      } finally {
+        fetching = false;
+      }
+    };
+    refreshPairingCode();
+    const refreshTimer = window.setInterval(refreshPairingCode, 5_000);
+    return () => {
+      active = false;
+      window.clearInterval(refreshTimer);
+    };
+  }, [showConnection, apiToken]);
+
+  const profile = profiles.find((item) => item.id === activeProfile) || profiles[0] || PROFILES.windows;
+  const layoutClass = 'grid-cols-1';
   const clockTime = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(clockNow);
   const clockSeconds = new Intl.DateTimeFormat(undefined, { second: '2-digit' }).format(clockNow);
   const clockDate = new Intl.DateTimeFormat(undefined, { weekday: 'long', month: 'short', day: 'numeric' }).format(clockNow);
@@ -174,59 +253,25 @@ export default function PulseDeck() {
   const seekMax = Math.max(seekMin, Math.min(mediaTimeline.duration, mediaTimeline.seekMax || mediaTimeline.duration));
   const displayedSeekPosition = Math.max(seekMin, Math.min(seekMax, currentPosition));
   const discordSelfVoice = discordVoice.members.find((member) => member.is_self);
-  const observedDiscordMicMuted = discordSelfVoice ? discordSelfVoice.self_muted || discordSelfVoice.server_muted : null;
-  const observedDiscordDeafened = discordSelfVoice ? discordSelfVoice.self_deafened || discordSelfVoice.server_deafened : null;
+  const observedDiscordMicMuted = discordRpc.connected ? Boolean(discordRpc.mute) : discordSelfVoice ? discordSelfVoice.self_muted || discordSelfVoice.server_muted : null;
+  const observedDiscordDeafened = discordRpc.connected ? Boolean(discordRpc.deaf) : discordSelfVoice ? discordSelfVoice.self_deafened || discordSelfVoice.server_deafened : null;
   const discordMicMuted = discordControlOverrides.mute ?? observedDiscordMicMuted;
   const discordDeafened = discordControlOverrides.deafen ?? observedDiscordDeafened;
 
   useEffect(() => {
-    if (!discordSelfVoice) return;
+    if (!discordRpc.connected && !discordSelfVoice) return;
     setDiscordControlOverrides((current) => ({
       mute: current.mute === observedDiscordMicMuted ? null : current.mute,
       deafen: current.deafen === observedDiscordDeafened ? null : current.deafen,
     }));
-  }, [discordSelfVoice?.self_muted, discordSelfVoice?.server_muted, discordSelfVoice?.self_deafened, discordSelfVoice?.server_deafened]);
-
-  useEffect(() => {
-    let active = true;
-    authRequest('/api/auth/status')
-      .then((data) => {
-        if (!active) return;
-        const configured = Boolean(data.account_configured);
-        setAccountConfigured(configured);
-        if (!apiToken) setToast(configured ? 'Sign in to control this PC' : 'Create the account for this PC');
-      })
-      .catch(() => { if (active) setAccountConfigured(false); });
-    return () => { active = false; };
-  }, []);
-
-  const submitAccount = async (event) => {
-    event.preventDefault();
-    setAuthBusy(true);
-    try {
-      const endpoint = accountConfigured ? '/api/auth/login' : '/api/auth/register';
-      const data = await authRequest(endpoint, { username: accountUsername, password: accountPassword });
-      saveAccountSession(data.token, data.username);
-      setApiToken(data.token);
-      setAccountUsername(data.username);
-      setAccountPassword('');
-      setAccountConfigured(true);
-      setToast('Signed in to this PC');
-    } catch (error) {
-      setToast(error.message || 'Could not sign in');
-    } finally {
-      setAuthBusy(false);
-    }
-  };
+  }, [discordSelfVoice?.self_muted, discordSelfVoice?.server_muted, discordSelfVoice?.self_deafened, discordSelfVoice?.server_deafened, discordRpc.connected, discordRpc.mute, discordRpc.deaf]);
 
   const logoutAccount = async () => {
     try { await apiRequest('/api/auth/logout', { method: 'POST', body: {} }); } catch { /* Clear the local session even if the PC is offline. */ }
     clearAccountSession();
     setApiToken('');
-    setAccountUsername('');
-    setAccountPassword('');
     setOnline(false);
-    setToast('Signed out');
+    window.location.replace('/account');
   };
 
   useEffect(() => {
@@ -243,8 +288,13 @@ export default function PulseDeck() {
         const data = await apiRequest('/api/status');
         if (!active) return;
         setOnline(true);
+        try {
+          const spotifyStatus = await apiRequest('/api/spotify/status');
+          if (active) setSpotifyConnection(spotifyStatus);
+        } catch { /* Windows media controls work even when OAuth is not configured. */ }
         setDiscordAvailable(Boolean(data.discord?.available));
         setDiscordVoice(data.discord?.voice || { configured: false, connection: 'disabled', guild: null, channel: null, members: [] });
+        setDiscordRpc(data.discord?.rpc || { configured: false, connected: false, username: null, mute: null, deaf: null, channel: null, error: null });
         if (data.spotify) {
           setTrack({
             title: data.spotify.title || 'Not Playing',
@@ -303,8 +353,10 @@ export default function PulseDeck() {
         }
         if (data.active_app) {
           if (autoSwitch) {
-            const matched = profiles.find((item) => (item.matchApps || []).includes(data.active_app.toLowerCase()));
+            const activeApp = data.active_app.toLowerCase();
+            const matched = profiles.find((item) => (item.matchApps || []).includes(activeApp));
             if (matched) setActiveProfile(matched.id);
+            else if (activeApp === 'desktop') setActiveProfile('windows');
           }
         }
       } catch (error) {
@@ -312,12 +364,11 @@ export default function PulseDeck() {
         setOnline(false);
         setDiscordAvailable(false);
         setDiscordVoice((current) => ({ ...current, connection: 'host-offline', guild: null, channel: null, members: [] }));
+        setDiscordRpc((current) => ({ ...current, connected: false }));
         const tokenRejected = /401|sign in|token rejected/i.test(error?.message || '');
         if (tokenRejected) {
           clearAccountSession();
           setApiToken('');
-          setAccountUsername('');
-          setAccountConfigured(true);
           setToast('Sign in again to control this PC');
           return;
         }
@@ -325,7 +376,7 @@ export default function PulseDeck() {
           ? 'Create an account or sign in to connect'
           : tokenRejected
             ? 'Host token rejected'
-            : 'Host unavailable — start Server.py');
+            : 'Host unavailable — start the PulseDeck backend');
       } finally {
         inFlight = false;
       }
@@ -337,6 +388,24 @@ export default function PulseDeck() {
       clearInterval(interval);
     };
   }, [autoSwitch, apiToken, profiles]);
+
+  useEffect(() => {
+    if (!online || !discordRpc.connected) return undefined;
+    let active = true;
+    let inFlight = false;
+    const refreshDiscordRpc = async () => {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        const state = await apiRequest('/api/discord/rpc/status');
+        if (active) setDiscordRpc(state);
+      } catch { /* The regular host status poll handles reconnect and error state. */ }
+      finally { inFlight = false; }
+    };
+    refreshDiscordRpc();
+    const interval = window.setInterval(refreshDiscordRpc, 750);
+    return () => { active = false; window.clearInterval(interval); };
+  }, [online, apiToken, discordRpc.connected]);
 
   useEffect(() => {
     if (!online) return undefined;
@@ -381,43 +450,6 @@ export default function PulseDeck() {
   }, []);
 
   useEffect(() => {
-    const clockPane = clockPaneRef.current;
-    const volumeMixer = volumeMixerRef.current;
-    if (!clockPane || !volumeMixer) return undefined;
-
-    const updateClockHeight = () => {
-      const shell = clockPane.closest('.deck-shell');
-      if (window.innerWidth < 1024 || shell?.classList.contains('landscape-preview')) {
-        clockPane.style.removeProperty('--clock-pane-height');
-        return;
-      }
-      const height = volumeMixer.getBoundingClientRect().bottom - clockPane.getBoundingClientRect().top;
-      clockPane.style.setProperty('--clock-pane-height', `${Math.max(0, height)}px`);
-    };
-
-    updateClockHeight();
-    const resizeObserver = new ResizeObserver(updateClockHeight);
-    resizeObserver.observe(volumeMixer);
-    window.addEventListener('resize', updateClockHeight);
-    return () => {
-      resizeObserver.disconnect();
-      window.removeEventListener('resize', updateClockHeight);
-    };
-  }, [volumes.apps.length]);
-
-  useEffect(() => {
-    document.documentElement.dataset.theme = theme;
-    const themeColor = document.querySelector('meta[name="theme-color"]');
-    if (themeColor) themeColor.content = theme === 'light' ? '#d2ddff' : '#15011d';
-    try { window.localStorage.setItem('pulsedeck-theme', theme); } catch { /* Keep the in-memory theme. */ }
-  }, [theme]);
-
-  useEffect(() => {
-    try { window.localStorage.setItem('pulsedeck-reduced-motion', String(reduceMotion)); }
-    catch { /* Keep the in-memory motion preference. */ }
-  }, [reduceMotion]);
-
-  useEffect(() => {
     try {
       const serializable = profiles.map(({ icon, ...item }) => ({
         ...item,
@@ -428,21 +460,107 @@ export default function PulseDeck() {
   }, [profiles]);
 
   const openProfileEditor = (item = null) => {
+    setRecordingShortcutIndex(null);
+    setRecordWinModifier(false);
     setProfileDraft(item ? {
       id: item.id, label: item.label, app: item.app || '',
       matchApps: (item.matchApps || []).join(', '),
-      macros: item.macros.slice(0, 3).map(({ id, label, sub, shortcut }) => ({ id, label, sub, shortcut })),
+      macros: item.macros.map(({ id, label, sub, shortcut }) => ({ id, label, sub, shortcut })),
     } : { id: '', label: '', app: '', matchApps: '', macros: [] });
     setProfileEditorOpen(true);
   };
 
+  const startShortcutRecording = async (index) => {
+    if (recordingShortcutIndex !== null) {
+      try { await apiRequest('/api/shortcuts/record/stop', { method: 'POST', body: {} }); } catch { /* Stop locally even if the host disconnected. */ }
+      setRecordingShortcutIndex(null);
+      return;
+    }
+    try {
+      await apiRequest('/api/shortcuts/record/start', { method: 'POST', body: {} });
+      setRecordingShortcutIndex(index);
+      setRecordWinModifier(false);
+      setToast('Recording · use Win toggle if the Windows key is not detected');
+    } catch (error) {
+      setToast(error.message || 'Could not start shortcut recording');
+    }
+  };
+
+  const stopShortcutRecording = async () => {
+    try { await apiRequest('/api/shortcuts/record/stop', { method: 'POST', body: {} }); } catch { /* Stop locally even if the host disconnected. */ }
+    setRecordingShortcutIndex(null);
+    setRecordWinModifier(false);
+    setToast('Shortcut recording cancelled');
+  };
+
+  const toggleRecordWinModifier = async () => {
+    const win = !recordWinModifier;
+    try {
+      const result = await apiRequest('/api/shortcuts/record/modifier', { method: 'POST', body: { win } });
+      setRecordWinModifier(Boolean(result.win));
+      setToast(result.win ? 'Win will be added to the next chord' : 'Win modifier cleared');
+    } catch (error) {
+      setToast(error.message || 'Could not set the Win modifier');
+    }
+  };
+
+  const closeProfileEditor = () => {
+    setProfileEditorOpen(false);
+    if (recordingShortcutIndex !== null) stopShortcutRecording();
+  };
+
+  useEffect(() => {
+    if (recordingShortcutIndex === null) return undefined;
+    let active = true;
+    let pollTimer;
+    const pollRecording = async () => {
+      try {
+        const status = await apiRequest('/api/shortcuts/record/status');
+        if (!active) return;
+        setRecordWinModifier(Boolean(status.force_windows_modifier));
+        if (status.active) {
+          const capturedSteps = [...(status.strokes || []), ...(status.current_stroke ? [status.current_stroke] : [])];
+          if (capturedSteps.length) setToast(`Recording · ${formatShortcutLabel(capturedSteps.join(', '))}`);
+          pollTimer = window.setTimeout(pollRecording, 100);
+          return;
+        }
+        if (status.shortcut) {
+          const shortcut = status.shortcut;
+          setProfileDraft((draft) => draft && ({
+            ...draft,
+            macros: draft.macros.map((macro, index) => index === recordingShortcutIndex ? {
+              ...macro,
+              shortcut,
+              sub: !macro.sub || macro.sub === formatShortcutLabel(macro.shortcut) ? formatShortcutLabel(shortcut) : macro.sub,
+            } : macro),
+          }));
+          setToast(`Recorded ${formatShortcutLabel(shortcut)}`);
+        } else if (status.error) setToast(status.error);
+        else if (status.cancelled) setToast('Shortcut recording cancelled');
+        setRecordingShortcutIndex(null);
+        setRecordWinModifier(false);
+      } catch (error) {
+        if (active) {
+          setToast(error.message || 'Shortcut recording stopped');
+          setRecordingShortcutIndex(null);
+        }
+      }
+    };
+    pollRecording();
+    return () => {
+      active = false;
+      window.clearTimeout(pollTimer);
+      apiRequest('/api/shortcuts/record/stop', { method: 'POST', body: {} }).catch(() => {});
+    };
+  }, [recordingShortcutIndex]);
+
   const saveProfileDraft = (event) => {
     event.preventDefault();
     const label = profileDraft.label.trim();
-    if (!label || !profileDraft.macros.length) return;
+    if (!label || !profileDraft.macros.length || profileDraft.macros.some((macro) => !macro.shortcut)) return;
     const id = profileDraft.id || `custom-${Date.now().toString(36)}`;
     const existing = profiles.find((item) => item.id === id);
-    const macros = profileDraft.macros.slice(0, 3).map((macro, index) => {
+    const macros = profileDraft.macros.map((macro, index) => {
       const original = existing?.macros.find((item) => item.id === macro.id);
       const shortcutLabel = SAFE_SHORTCUTS.find(([value]) => value === macro.shortcut)?.[1] || macro.shortcut;
       return {
@@ -462,14 +580,16 @@ export default function PulseDeck() {
     setActiveProfile(id);
     setAutoSwitch(false);
     setProfileEditorOpen(false);
+    setRecordingShortcutIndex(null);
     setToast(`Profile saved · ${label}`);
   };
 
   const deleteProfile = (id) => {
     if (Object.prototype.hasOwnProperty.call(PROFILES, id)) return;
     setProfiles((current) => current.filter((item) => item.id !== id));
-    if (activeProfile === id) setActiveProfile('photo');
+    if (activeProfile === id) setActiveProfile('windows');
     setProfileEditorOpen(false);
+    setRecordingShortcutIndex(null);
     setToast('Custom profile deleted');
   };
 
@@ -483,11 +603,20 @@ export default function PulseDeck() {
     }
   };
 
-  const fireMacro = (macro) => {
+  const fireMacro = async (macro) => {
+    setBusyMacroId(macro.id);
     if (navigator.vibrate) navigator.vibrate(20);
     setToast(`${macro.label} · ${macro.sub}`);
-    if (macro.shortcut === 'duck_spotify') handleVolume('spotify', 15);
-    else triggerBackend('/api/hotkey', { shortcut: macro.shortcut, label: macro.label });
+    try {
+      if (macro.shortcut === 'duck_spotify') handleVolume('spotify', 15);
+      else {
+        const ok = await triggerBackend('/api/hotkey', { shortcut: macro.shortcut, label: macro.label });
+        if (ok && macro.shortcut === 'windows+print screen') setToast('Screenshot saved to Pictures\\Screenshots');
+        else if (ok && macro.shortcut === 'windows+l') setToast('Locking PC');
+      }
+    } finally {
+      window.setTimeout(() => setBusyMacroId((current) => current === macro.id ? null : current), 240);
+    }
   };
 
   const launchApp = async (appItem) => {
@@ -595,6 +724,15 @@ export default function PulseDeck() {
     });
   };
 
+  const connectSpotify = async () => {
+    try {
+      const { url } = await apiRequest('/api/spotify/connect', { method: 'POST', body: {} });
+      window.location.assign(url);
+    } catch (error) {
+      setToast(error.message || 'Could not start Spotify authorization');
+    }
+  };
+
   const handleDiscord = (action, label) => {
     if (navigator.vibrate) navigator.vibrate(15);
     setToast(label);
@@ -609,6 +747,36 @@ export default function PulseDeck() {
         setDiscordControlOverrides((current) => ({ ...current, [control]: null }));
       }
     });
+  };
+
+  const connectDiscordRpc = async () => {
+    if (discordRpcConnecting) return;
+    setDiscordRpcConnecting(true);
+    setDiscordRpcConnectError('');
+    setToast('Waiting for Discord authorization… Approve the prompt in Discord Desktop.');
+    try {
+      const result = await apiRequest('/api/discord/rpc/connect', { method: 'POST', body: {}, timeoutMs: 180_000 });
+      // The authorization response confirms the token was saved. Update the
+      // UI immediately instead of waiting for the next host status poll.
+      setDiscordRpc((current) => ({
+        ...current,
+        configured: true,
+        connected: true,
+        username: result.username || current.username,
+        error: null,
+      }));
+      setDiscordRpcConnectError('');
+      setToast(`Discord local RPC connected${result.username ? ` as ${result.username}` : ''}`);
+      try {
+        const state = await apiRequest('/api/discord/rpc/status');
+        setDiscordRpc(state);
+      } catch { /* Keep the successful authorization state; polling will retry. */ }
+    } catch (error) {
+      setDiscordRpcConnectError(error.message || 'Discord local RPC could not connect');
+      setToast(error.message || 'Discord local RPC could not connect');
+    } finally {
+      setDiscordRpcConnecting(false);
+    }
   };
 
   const handleVolume = (target, val) => {
@@ -644,7 +812,7 @@ export default function PulseDeck() {
   const frameWidth = 'max-w-[1440px]';
 
   return (
-    <main data-theme={theme} data-reduced-motion={reduceMotion} className="deck-shell min-h-screen overflow-x-clip px-3 py-4 text-zinc-100 sm:px-6 sm:py-6 lg:px-10 lg:py-8">
+    <main data-theme="dark" className="deck-shell min-h-screen overflow-x-clip px-3 py-4 text-zinc-100 sm:px-6 sm:py-6 lg:px-10 lg:py-8">
       <div className="deck-orb deck-orb-one" />
       <div className="deck-orb deck-orb-two" />
       <div className={`deck-content relative z-10 mx-auto flex min-h-[calc(100vh-2rem)] w-full flex-col ${frameWidth}`}>
@@ -661,11 +829,15 @@ export default function PulseDeck() {
           </div>
 
           <div className="flex items-center gap-2">
-            <div className="host-status" role="status" aria-live="polite">
+            <motion.div className="host-status" role="status" aria-live="polite" layout transition={{ type: 'spring', stiffness: 420, damping: 32 }}>
               <span className={`status-led ${online ? 'is-online' : ''}`} />
-              <span>{online ? 'HOST CONNECTED' : 'HOST OFFLINE'}</span>
-            </div>
-            <button
+              <AnimatePresence mode="wait" initial={false}>
+                <motion.span key={online ? 'online' : 'offline'} initial={{ opacity: 0, y: 5 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -5 }} transition={{ duration: 0.16 }}>
+                  {online ? 'HOST CONNECTED' : 'HOST OFFLINE'}
+                </motion.span>
+              </AnimatePresence>
+            </motion.div>
+            <SpringButton
               type="button"
               aria-label="Toggle automatic profile switching"
               aria-pressed={autoSwitch}
@@ -678,8 +850,8 @@ export default function PulseDeck() {
               className={`icon-button ${autoSwitch ? 'icon-button-active' : ''}`}
             >
               <RefreshCw className="h-4 w-4" />
-            </button>
-            <button
+            </SpringButton>
+            <SpringButton
               type="button"
               className={`icon-button ${showConnection ? 'icon-button-active' : ''}`}
               aria-label={showConnection ? 'Hide connection settings' : 'Show connection settings'}
@@ -689,30 +861,12 @@ export default function PulseDeck() {
               onClick={() => setShowConnection((visible) => !visible)}
             >
               <ChevronDown className={`h-4 w-4 transition-transform ${showConnection ? 'rotate-180' : ''}`} />
-            </button>
-            <button
-              type="button"
-              className="icon-button theme-toggle"
-              aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}
-              title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}
-              onClick={() => setTheme((current) => current === 'dark' ? 'light' : 'dark')}
-            >
-              {theme === 'dark' ? <SunIcon className="h-4 w-4" /> : <MoonIcon className="h-4 w-4" />}
-            </button>
-            <button
-              type="button"
-              className={`icon-button motion-toggle ${reduceMotion ? 'icon-button-active' : ''}`}
-              aria-label={reduceMotion ? 'Enable animations' : 'Reduce motion'}
-              aria-pressed={reduceMotion}
-              title={reduceMotion ? 'Enable animations' : 'Reduce motion'}
-              onClick={() => setReduceMotion((current) => !current)}
-            >
-              {reduceMotion ? <Pause className="h-4 w-4" /> : <Activity className="h-4 w-4" />}
-            </button>
+            </SpringButton>
           </div>
         </header>
 
-        {showConnection && <section id="connection-settings" className="connection-bar mb-5 sm:mb-7">
+        <AnimatePresence initial={false}>
+        {showConnection && <motion.section id="connection-settings" className="connection-bar mb-5 sm:mb-7" initial={{ opacity: 0, height: 0, y: -10 }} animate={{ opacity: 1, height: 'auto', y: 0 }} exit={{ opacity: 0, height: 0, y: -8 }} transition={{ type: 'spring', stiffness: 320, damping: 30 }} style={{ overflow: 'hidden' }}>
           <div className="flex min-w-0 items-center gap-3">
             <div className={`connection-icon ${online ? 'connected' : ''}`}><Wifi className="h-4 w-4" /></div>
             <div className="min-w-0">
@@ -720,23 +874,24 @@ export default function PulseDeck() {
               <p className="mt-0.5 truncate text-xs text-zinc-300">{online ? `Connected · ${toast}` : toast}</p>
             </div>
           </div>
-          {apiToken ? (
-            <div className="flex min-w-[190px] flex-1 items-center justify-end gap-2 sm:max-w-[380px]">
-              <span className="truncate text-[10px] text-zinc-500">{accountUsername ? `Signed in as ${accountUsername}` : 'Authenticated session'}</span>
-              <button type="button" className="launcher-edit-toggle" onClick={logoutAccount}>Sign out</button>
+          <div className="connection-actions">
+            <a href="/account?recovery=setup" className="connection-action">Recovery email</a>
+            <SpringButton type="button" className="connection-action" onClick={logoutAccount}>Sign out</SpringButton>
+          </div>
+          <div className="flex w-full flex-wrap items-center gap-4 border-t border-white/[0.06] pt-3">
+            <div className="min-w-[180px] flex-1">
+              <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-zinc-500">Open on your phone</p>
+              <p className="mt-1 text-[10px] text-zinc-400">Scan within 5 minutes. Phone sign-in ends when the server restarts; keep this QR private.</p>
             </div>
-          ) : accountConfigured === null ? (
-            <span className="text-[10px] text-zinc-500">Connecting to PC…</span>
-          ) : (
-            <form className="flex min-w-[190px] flex-1 flex-wrap items-center justify-end gap-2 sm:max-w-[520px]" onSubmit={submitAccount}>
-              <label htmlFor="account-username" className="sr-only">Account username</label>
-              <input id="account-username" className="token-input min-w-0 flex-1" type="text" autoComplete="username" minLength={3} maxLength={32} required value={accountUsername} onChange={(event) => setAccountUsername(event.target.value)} placeholder="Username" />
-              <label htmlFor="account-password" className="sr-only">Account password</label>
-              <input id="account-password" className="token-input min-w-0 flex-1" type="password" autoComplete={accountConfigured ? 'current-password' : 'new-password'} minLength={10} maxLength={256} required value={accountPassword} onChange={(event) => setAccountPassword(event.target.value)} placeholder={accountConfigured ? 'Password' : 'Create password'} />
-              <button type="submit" className="launcher-edit-toggle" disabled={authBusy}>{authBusy ? 'Please wait…' : accountConfigured ? 'Sign in' : 'Create account'}</button>
-            </form>
-          )}
-        </section>}
+            {connectionUrls.length ? connectionUrls.map(({ url, pairingUrl }) => (
+              <a key={url} href={pairingUrl} className="flex items-center gap-3 rounded-xl border border-white/[0.08] bg-black/20 p-2 transition hover:border-[#b4ff00]/30" title={`Pair phone with ${url}`}>
+                <span className="rounded-md bg-white p-1"><QRCodeSVG value={pairingUrl} size={76} level="M" /></span>
+                <span className="max-w-[150px] break-all text-[10px] text-zinc-300">{url}</span>
+              </a>
+            )) : <span className="text-[10px] text-zinc-500">{apiToken ? 'Preparing a secure pairing QR…' : 'Sign in on this PC to create a phone pairing QR.'}</span>}
+          </div>
+        </motion.section>}
+        </AnimatePresence>
 
         <nav className="mb-5 flex items-center gap-1.5 overflow-x-auto pb-1 sm:mb-7" aria-label="Control profiles">
           <span className="mr-2 hidden text-[10px] font-semibold uppercase tracking-[0.16em] text-zinc-600 sm:inline">Workspace</span>
@@ -744,9 +899,13 @@ export default function PulseDeck() {
             const Icon = iconPack === 'phosphor' ? PHOSPHOR_PROFILE_ICONS[item.id] || item.icon : item.icon;
             const selected = activeProfile === item.id;
             return (
-              <button
+              <motion.button
                 type="button"
                 key={item.id}
+                layout
+                transition={{ type: 'spring', stiffness: 420, damping: 30 }}
+                whileHover={{ y: -1 }}
+                whileTap={{ scale: 0.96, y: 1 }}
                 aria-pressed={selected}
                 onClick={() => {
                   setAutoSwitch(false);
@@ -757,23 +916,24 @@ export default function PulseDeck() {
               >
                 <Icon className="h-3.5 w-3.5" />
                 <span>{item.label}</span>
-                {selected && <span className="profile-tab-dot" />}
-              </button>
+                {selected && <motion.span layoutId="profile-tab-indicator" className="profile-tab-dot" transition={{ type: 'spring', stiffness: 500, damping: 34 }} />}
+              </motion.button>
             );
           })}
-          <button type="button" className="profile-tab profile-manage-button" onClick={() => openProfileEditor(profile)} title="Edit the selected profile and its shortcuts">
+          <SpringButton type="button" className="profile-tab profile-manage-button" onClick={() => openProfileEditor(profile)} title="Edit the selected profile and its shortcuts">
             <Pencil className="h-3.5 w-3.5" /><span>Manage</span>
-          </button>
-          <button type="button" className="profile-tab profile-add-button" onClick={() => openProfileEditor()} title="Add a work profile">
+          </SpringButton>
+          <SpringButton type="button" className="profile-tab profile-add-button" onClick={() => openProfileEditor()} title="Add a work profile">
             <Plus className="h-3.5 w-3.5" /><span>Add profile</span>
-          </button>
+          </SpringButton>
+          <SportsScores />
         </nav>
 
-        {profileEditorOpen && profileDraft && <div className="profile-editor-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setProfileEditorOpen(false); }}>
+        {profileEditorOpen && profileDraft && <div className="profile-editor-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) closeProfileEditor(); }}>
           <section className="profile-editor surface-card" role="dialog" aria-modal="true" aria-labelledby="profile-editor-title">
             <div className="profile-editor-heading">
               <div><p className="eyebrow">WORKSPACE SETUP</p><h2 id="profile-editor-title">{profileDraft.id ? 'Edit profile' : 'Create profile'}</h2></div>
-              <button type="button" className="icon-button" onClick={() => setProfileEditorOpen(false)} aria-label="Close profile editor"><X className="h-4 w-4" /></button>
+              <SpringButton type="button" className="icon-button" onClick={closeProfileEditor} aria-label="Close profile editor"><X className="h-4 w-4" /></SpringButton>
             </div>
             <form onSubmit={saveProfileDraft}>
               <div className="profile-editor-fields">
@@ -781,51 +941,79 @@ export default function PulseDeck() {
                 <label>Primary app<input maxLength="80" value={profileDraft.app} onChange={(event) => setProfileDraft((draft) => ({ ...draft, app: event.target.value }))} placeholder="e.g. Word.exe" /></label>
                 <label className="profile-app-matches">Auto-switch app names<input value={profileDraft.matchApps} onChange={(event) => setProfileDraft((draft) => ({ ...draft, matchApps: event.target.value }))} placeholder="word.exe, winword.exe (comma separated)" /><small>Use executable names. Leave blank to select this profile manually.</small></label>
               </div>
-              <div className="profile-shortcut-heading"><div><h3>Shortcut cards</h3><p>Choose from host-approved actions.</p></div>
-                <button type="button" className="editor-add-action" disabled={profileDraft.macros.length >= 3} onClick={() => setProfileDraft((draft) => ({ ...draft, macros: [...draft.macros, { id: '', label: '', sub: '', shortcut: SAFE_SHORTCUTS[0][0] }] }))}><Plus className="h-3.5 w-3.5" /> Add shortcut</button>
+              <div className="profile-shortcut-heading"><div><h3>Shortcut cards</h3><p>Enter the sequence and pause 4 seconds to finish. Use Win toggle if the Windows key is not detected. Keyboard input is blocked; Escape cancels.</p></div>
+                <SpringButton type="button" className="editor-add-action" onClick={() => setProfileDraft((draft) => ({ ...draft, macros: [...draft.macros, { id: '', label: '', sub: '', shortcut: '' }] }))}><Plus className="h-3.5 w-3.5" /> Add shortcut</SpringButton>
               </div>
               <div className="profile-shortcut-list">
-                {profileDraft.macros.map((macro, index) => <div className="profile-shortcut-row" key={macro.id || `new-${index}`}>
+                {profileDraft.macros.map((macro, index) => <div className={`profile-shortcut-row ${recordingShortcutIndex === index ? 'profile-shortcut-recording' : ''}`} key={macro.id || `new-${index}`}>
                   <label>Card name<input required maxLength="40" value={macro.label} onChange={(event) => setProfileDraft((draft) => ({ ...draft, macros: draft.macros.map((item, i) => i === index ? { ...item, label: event.target.value } : item) }))} placeholder="e.g. Save document" /></label>
                   <label>Hint<input maxLength="40" value={macro.sub} onChange={(event) => setProfileDraft((draft) => ({ ...draft, macros: draft.macros.map((item, i) => i === index ? { ...item, sub: event.target.value } : item) }))} placeholder="Shown under the card name" /></label>
-                  <label>Action<select value={macro.shortcut} onChange={(event) => setProfileDraft((draft) => ({ ...draft, macros: draft.macros.map((item, i) => i === index ? { ...item, shortcut: event.target.value } : item) }))}>{SAFE_SHORTCUTS.map(([value, text]) => <option value={value} key={value}>{text}</option>)}</select></label>
-                  <button type="button" className="editor-remove-action" aria-label={`Remove ${macro.label || 'shortcut'}`} onClick={() => setProfileDraft((draft) => ({ ...draft, macros: draft.macros.filter((_, i) => i !== index) }))}><Trash2 className="h-4 w-4" /></button>
+                  <label>Action<div className="shortcut-recorder-controls">
+                    <select value={macro.shortcut} onChange={(event) => setProfileDraft((draft) => ({ ...draft, macros: draft.macros.map((item, i) => i === index ? {
+                      ...item,
+                      shortcut: event.target.value,
+                      sub: !item.sub || item.sub === formatShortcutLabel(item.shortcut) ? formatShortcutLabel(event.target.value) : item.sub,
+                    } : item) }))}>
+                      <option value="" disabled>Choose or record</option>
+                      {SAFE_SHORTCUTS.map(([value, text]) => <option value={value} key={value}>{text}</option>)}
+                      {macro.shortcut && !SAFE_SHORTCUTS.some(([value]) => value === macro.shortcut) && <option value={macro.shortcut}>{formatShortcutLabel(macro.shortcut)}</option>}
+                    </select>
+                    <SpringButton type="button" className={`shortcut-record-button ${recordingShortcutIndex === index ? 'shortcut-recording-active' : ''}`} onClick={() => recordingShortcutIndex === index ? stopShortcutRecording() : startShortcutRecording(index)} aria-pressed={recordingShortcutIndex === index}>{recordingShortcutIndex === index ? 'Cancel' : 'Record'}</SpringButton>
+                    {recordingShortcutIndex === index && <SpringButton type="button" className={`shortcut-win-toggle ${recordWinModifier ? 'shortcut-win-selected' : ''}`} onClick={toggleRecordWinModifier} aria-pressed={recordWinModifier}>Win</SpringButton>}
+                  </div></label>
+                  <SpringButton type="button" className="editor-remove-action" aria-label={`Remove ${macro.label || 'shortcut'}`} onClick={() => setProfileDraft((draft) => ({ ...draft, macros: draft.macros.filter((_, i) => i !== index) }))}><Trash2 className="h-4 w-4" /></SpringButton>
                 </div>)}
                 {profileDraft.macros.length === 0 && <p className="profile-editor-empty">Add at least one shortcut card to save this profile.</p>}
               </div>
               <div className="profile-editor-footer">
-                {profileDraft.id && !Object.prototype.hasOwnProperty.call(PROFILES, profileDraft.id) && <button type="button" className="editor-delete-profile" onClick={() => deleteProfile(profileDraft.id)}><Trash2 className="h-3.5 w-3.5" /> Delete profile</button>}
-                <button type="button" className="editor-cancel" onClick={() => setProfileEditorOpen(false)}>Cancel</button>
-                <button type="submit" className="editor-save" disabled={!profileDraft.label.trim() || profileDraft.macros.length === 0}><Save className="h-3.5 w-3.5" /> Save profile</button>
+                {profileDraft.id && !Object.prototype.hasOwnProperty.call(PROFILES, profileDraft.id) && <SpringButton type="button" className="editor-delete-profile" onClick={() => deleteProfile(profileDraft.id)}><Trash2 className="h-3.5 w-3.5" /> Delete profile</SpringButton>}
+                <SpringButton type="button" className="editor-cancel" onClick={closeProfileEditor}>Cancel</SpringButton>
+                <SpringButton type="submit" className="editor-save" disabled={recordingShortcutIndex !== null || !profileDraft.label.trim() || profileDraft.macros.length === 0 || profileDraft.macros.some((macro) => !macro.shortcut)}><Save className="h-3.5 w-3.5" /> Save profile</SpringButton>
               </div>
             </form>
           </section>
         </div>}
 
-        <div className={`deck-layout grid flex-1 gap-4 ${layoutClass}`}>
+        <motion.div layout className={`deck-layout grid flex-1 gap-4 ${layoutClass}`} transition={{ type: 'spring', stiffness: 300, damping: 32 }}>
           <section className="flex min-w-0 flex-col gap-4" aria-label="Media and audio controls">
-            <article className="surface-card player-card">
+            <motion.article layout className={`surface-card player-card${isPlaying === true ? ' player-card-streaming' : ''}`} whileTap={{ scale: 0.998 }} transition={{ type: 'spring', stiffness: 420, damping: 28 }}>
               {track.artwork && <div className="player-art-backdrop" style={{ backgroundImage: `url("${track.artwork}")` }} />}
               <div className="player-heading relative z-10 flex items-center justify-between">
                 <div className="eyebrow"><span className={`status-led ${isPlaying ? 'is-online' : ''}`} /> MUSIC</div>
-                <span className="spotify-tag"><span className="spotify-mark">◖</span> SPOTIFY</span>
+                <div className="flex items-center gap-2">
+                  <span className="spotify-tag"><span className="spotify-mark">◖</span> SPOTIFY</span>
+                  <AudioWaveform active={isPlaying === true} />
+                  {!spotifyConnection.connected && <SpringButton type="button" onClick={connectSpotify} className="rounded-full border border-emerald-400/30 bg-emerald-400/10 px-2.5 py-1 text-[10px] font-semibold text-emerald-200 hover:bg-emerald-400/20">{spotifyConnection.configured ? 'Connect Spotify' : 'Set up Spotify'}</SpringButton>}
+                </div>
               </div>
               <div className="player-main relative z-10 mt-5 flex min-w-0 items-center gap-4">
                 {track.artwork ? (
-                  <img src={track.artwork} alt={`${track.title} album artwork`} onError={() => setTrack((current) => ({ ...current, artwork: '' }))} className="album-art" />
+                  <div className={`album-disc${isPlaying === true ? ' album-disc-playing' : ''}`}>
+                  <motion.img
+                    key={`${track.title}-${track.artist}-${track.artwork}`}
+                    src={track.artwork}
+                    alt={`${track.title} album artwork`}
+                    onError={() => setTrack((current) => ({ ...current, artwork: '' }))}
+                    className="album-art"
+                    initial={{ opacity: 0, scale: 0.88, rotate: -4 }}
+                    animate={{ opacity: 1, scale: 1, rotate: 0 }}
+                    transition={{ type: 'spring', stiffness: 300, damping: 24 }}
+                  />
+                  </div>
                 ) : (
                   <div className="album-art album-art-placeholder"><Wifi className="h-7 w-7 rotate-45" /></div>
                 )}
                 <div className="min-w-0">
                   <h2 className="track-title">{track.title}</h2>
                   <p className="mt-1 truncate text-sm text-zinc-400">{track.artist}</p>
+                  {!spotifyConnection.connected && <SpringButton type="button" onClick={connectSpotify} className="mt-1.5 rounded-full border border-emerald-400/30 bg-emerald-400/10 px-2.5 py-1 text-[10px] font-semibold text-emerald-200 hover:bg-emerald-400/20">{spotifyConnection.configured ? 'Connect Spotify' : 'Set up Spotify'}</SpringButton>}
                 </div>
               </div>
               <div className="player-footer relative z-10 mt-5 flex items-center justify-between border-t border-white/10 pt-4">
                 <span className="text-[10px] text-zinc-500">{isPlaying === null ? 'Playback state unavailable' : isPlaying ? 'Playing on your PC' : 'Playback paused'}</span>
                 <label className="player-volume" title={spotifyVolume ? `Spotify volume ${spotifyVolume.volume}%` : 'Open Spotify to enable its volume control'}>
                   <Volume2 className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                  <input
+                  <motion.input
                     type="range"
                     min="0"
                     max="100"
@@ -837,19 +1025,21 @@ export default function PulseDeck() {
                     onChange={(event) => spotifyVolume && handleVolume(spotifyVolume.id, Number(event.target.value))}
                     style={{ '--volume-level': `${spotifyVolume?.volume ?? 0}%` }}
                     className="player-volume-range"
+                    whileTap={{ scale: 1.015 }}
+                    transition={{ type: 'spring', stiffness: 480, damping: 24 }}
                   />
                   <span className="player-volume-value">{spotifyVolume ? `${spotifyVolume.volume}%` : '—'}</span>
                 </label>
                 <div className="flex items-center gap-2">
-                  <button type="button" aria-label="Previous Spotify track" title="Previous track" onClick={() => handleMedia('prev', 'Spotify · Previous track')} className="transport-button">
+                  <motion.button type="button" aria-label="Previous Spotify track" title="Previous track" onClick={() => handleMedia('prev', 'Spotify · Previous track')} className="transport-button" whileHover={{ y: -1 }} whileTap={{ scale: 0.9, y: 1 }} transition={{ type: 'spring', stiffness: 480, damping: 25 }}>
                     <SkipBack className="h-4 w-4" />
-                  </button>
-                  <button type="button" aria-label={isPlaying ? 'Pause Spotify' : 'Play Spotify'} title={isPlaying ? 'Pause' : 'Play'} onClick={() => handleMedia('play_pause', isPlaying ? 'Spotify · Pause' : 'Spotify · Play')} className="transport-primary">
+                  </motion.button>
+                  <motion.button type="button" aria-label={isPlaying ? 'Pause Spotify' : 'Play Spotify'} title={isPlaying ? 'Pause' : 'Play'} onClick={() => handleMedia('play_pause', isPlaying ? 'Spotify · Pause' : 'Spotify · Play')} className="transport-primary" whileHover={{ y: -2, scale: 1.035 }} whileTap={{ scale: 0.92, y: 1 }} transition={{ type: 'spring', stiffness: 520, damping: 22 }}>
                     {isPlaying ? <Pause className="h-4 w-4 fill-current" /> : <Play className="ml-0.5 h-4 w-4 fill-current" />}
-                  </button>
-                  <button type="button" aria-label="Next Spotify track" title="Next track" onClick={() => handleMedia('next', 'Spotify · Next track')} className="transport-button">
+                  </motion.button>
+                  <motion.button type="button" aria-label="Next Spotify track" title="Next track" onClick={() => handleMedia('next', 'Spotify · Next track')} className="transport-button" whileHover={{ y: -1 }} whileTap={{ scale: 0.9, y: 1 }} transition={{ type: 'spring', stiffness: 480, damping: 25 }}>
                     <SkipForward className="h-4 w-4" />
-                  </button>
+                  </motion.button>
                 </div>
               </div>
               <div className="player-timeline relative z-10" aria-label="Spotify playback position">
@@ -857,7 +1047,7 @@ export default function PulseDeck() {
                   <span>{formatMediaTime(currentPosition)}</span>
                   <span>{mediaTimeline.duration ? `-${formatMediaTime(mediaTimeline.duration - currentPosition)}` : '--:--'}</span>
                 </div>
-                <input
+                <motion.input
                   type="range"
                   min={seekMin}
                   max={seekMax || 1}
@@ -869,9 +1059,11 @@ export default function PulseDeck() {
                   onChange={(event) => handleSeek(event.target.value)}
                   style={{ '--seek-progress': `${mediaTimeline.duration ? (displayedSeekPosition / mediaTimeline.duration) * 100 : 0}%` }}
                   className="player-seek-range"
+                  whileTap={{ scaleY: 1.25 }}
+                  transition={{ type: 'spring', stiffness: 480, damping: 24 }}
                 />
               </div>
-            </article>
+            </motion.article>
 
             <article className="surface-card soundboard-pane p-4 sm:p-5" aria-label="Soundboard">
               <div className="section-heading mb-3">
@@ -879,10 +1071,10 @@ export default function PulseDeck() {
                   <div className="section-icon icon-cyan"><Volume2 className="h-4 w-4" /></div>
                   <div><h2 className="section-title">Soundboard</h2></div>
                 </div>
-                <button type="button" className="launcher-edit-toggle" onClick={() => { setSoundboardEditing((editing) => !editing); setEditingSoundId(null); }} aria-pressed={soundboardEditing}>
+                <SpringButton type="button" className="launcher-edit-toggle" onClick={() => { setSoundboardEditing((editing) => !editing); setEditingSoundId(null); }} aria-pressed={soundboardEditing}>
                   {soundboardEditing ? <Check className="h-3.5 w-3.5" /> : <Pencil className="h-3.5 w-3.5" />}
                   <span>{soundboardEditing ? 'Done' : 'Edit'}</span>
-                </button>
+                </SpringButton>
               </div>
               {soundboardEditing && <div className="soundboard-upload-row">
                 <input className="soundboard-name-input" type="text" value={soundNameDraft} maxLength={40} onChange={(event) => setSoundNameDraft(event.target.value)} placeholder="Sound name (optional)" aria-label="Name for your sound" disabled={!online || soundUploading} />
@@ -899,28 +1091,28 @@ export default function PulseDeck() {
                   .map((sound) => (
                   <div className="soundboard-item" key={sound.id}>
                     {sound.builtin && !sound.visible ? (
-                      <button type="button" className="soundboard-restore-button" onClick={() => restoreBuiltinSound(sound.id)} title={`Add ${sound.name} back to the soundboard`}>
+                      <SpringButton type="button" className="soundboard-restore-button" onClick={() => restoreBuiltinSound(sound.id)} title={`Add ${sound.name} back to the soundboard`}>
                         <Plus className="h-3.5 w-3.5" aria-hidden="true" />
                         <span>Add {sound.name}</span>
-                      </button>
+                      </SpringButton>
                     ) : !sound.builtin && editingSoundId === sound.id ? (
                       <div className="soundboard-edit-row">
                         <input autoFocus className="soundboard-edit-input" type="text" value={editingSoundName} maxLength={40} onChange={(event) => setEditingSoundName(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') saveCustomSoundName(sound); if (event.key === 'Escape') setEditingSoundId(null); }} aria-label={`Edit ${sound.name} name`} />
-                        <button type="button" className="soundboard-edit-action" onClick={() => saveCustomSoundName(sound)} disabled={!online || !editingSoundName.trim()} aria-label="Save sound name"><Check className="h-3.5 w-3.5" /></button>
-                        <button type="button" className="soundboard-edit-action" onClick={() => setEditingSoundId(null)} aria-label="Cancel sound name edit"><X className="h-3.5 w-3.5" /></button>
+                        <SpringButton type="button" className="soundboard-edit-action" onClick={() => saveCustomSoundName(sound)} disabled={!online || !editingSoundName.trim()} aria-label="Save sound name"><Check className="h-3.5 w-3.5" /></SpringButton>
+                        <SpringButton type="button" className="soundboard-edit-action" onClick={() => setEditingSoundId(null)} aria-label="Cancel sound name edit"><X className="h-3.5 w-3.5" /></SpringButton>
                       </div>
                     ) : (
                       <>
-                        <button type="button" className="soundboard-button" onClick={() => playSound({ ...sound, label: sound.name })} disabled={!online} title={`Play ${sound.name} on your PC`}>
+                        <SpringButton type="button" className="soundboard-button" onClick={() => playSound({ ...sound, label: sound.name })} disabled={!online} title={`Play ${sound.name} on your PC`}>
                           <Play className="h-3.5 w-3.5" aria-hidden="true" />
                           <span>{sound.name}</span>
-                        </button>
+                        </SpringButton>
                         {soundboardEditing && <div className="soundboard-actions">
                           {sound.builtin ? (
-                            <button type="button" className="soundboard-edit-action soundboard-delete-action" onClick={() => removeBuiltinSound(sound.id)} aria-label={`Remove ${sound.name} from soundboard`} title={`Remove ${sound.name} from soundboard`}><Trash2 className="h-3 w-3" /></button>
+                            <SpringButton type="button" className="soundboard-edit-action soundboard-delete-action" onClick={() => removeBuiltinSound(sound.id)} aria-label={`Remove ${sound.name} from soundboard`} title={`Remove ${sound.name} from soundboard`}><Trash2 className="h-3 w-3" /></SpringButton>
                           ) : <>
-                            <button type="button" className="soundboard-edit-action" onClick={() => { setEditingSoundId(sound.id); setEditingSoundName(sound.name); }} aria-label={`Edit ${sound.name}`} title={`Edit ${sound.name}`}><Pencil className="h-3 w-3" /></button>
-                            <button type="button" className="soundboard-edit-action soundboard-delete-action" onClick={() => removeCustomSound(sound)} disabled={!online} aria-label={`Remove ${sound.name}`} title={`Remove ${sound.name}`}><Trash2 className="h-3 w-3" /></button>
+                            <SpringButton type="button" className="soundboard-edit-action" onClick={() => { setEditingSoundId(sound.id); setEditingSoundName(sound.name); }} aria-label={`Edit ${sound.name}`} title={`Edit ${sound.name}`}><Pencil className="h-3 w-3" /></SpringButton>
+                            <SpringButton type="button" className="soundboard-edit-action soundboard-delete-action" onClick={() => removeCustomSound(sound)} disabled={!online} aria-label={`Remove ${sound.name}`} title={`Remove ${sound.name}`}><Trash2 className="h-3 w-3" /></SpringButton>
                           </>}
                         </div>}
                       </>
@@ -932,7 +1124,7 @@ export default function PulseDeck() {
               {customSounds.length >= 24 && <p className="soundboard-limit-note">You’ve reached the 24 custom sound limit.</p>}
             </article>
 
-            <article ref={volumeMixerRef} className="surface-card volume-mixer-pane p-4 sm:p-5">
+            <article className="surface-card volume-mixer-pane p-4 sm:p-5">
               <div className="section-heading mb-4">
                 <div className="flex items-center gap-2.5">
                   <div className="section-icon icon-cyan"><Volume2 className="h-4 w-4" /></div>
@@ -953,12 +1145,12 @@ export default function PulseDeck() {
                   />
                 ))}
                 {volumes.apps.length === 0 && <p className="rounded-xl border border-dashed border-white/10 px-3 py-3 text-[11px] text-zinc-500">No active app audio sessions</p>}
-                <TouchVolumePill label="Master output" target="master" value={volumes.master} onChange={handleVolume} colorClass="bg-[#b4ff00]/20" icon={Volume2} />
+                <TouchVolumePill label="Master output" target="master" value={volumes.master} onChange={handleVolume} colorClass="bg-cyan-400/20" icon={Volume2} />
               </div>
             </article>
           </section>
 
-          <aside ref={clockPaneRef} className="time-pane surface-card" aria-label="Local date and time">
+          <aside className="time-pane surface-card" aria-label="Local date and time">
             <div className="time-pane-label"><Clock3 className="h-3.5 w-3.5" /> LOCAL TIME</div>
             <div className="time-center">
               <div className="clock-orbit" style={{ '--clock-sweep': `${clockNow.getSeconds() * 6}deg` }}>
@@ -974,31 +1166,34 @@ export default function PulseDeck() {
               <div className="time-date-icon"><CalendarDays className="h-4 w-4" /></div>
               <div className="time-weekday">{clockDate.split(',')[0]}</div>
               <div className="time-date">{clockDate.includes(',') ? clockDate.slice(clockDate.indexOf(',') + 2) : clockDate}</div>
+              <div id="sports-score-slot" />
             </div>
           </aside>
 
           <section className="shortcut-discord-stack flex min-w-0 flex-col gap-4" aria-label="Shortcuts, apps, and Discord controls">
-            <div className="surface-card shortcut-panel flex min-w-0 flex-col p-4 sm:p-5 lg:p-6" aria-label={`${profile.label} shortcuts`}>
+            <motion.div layout className="surface-card shortcut-panel flex min-w-0 flex-col p-4 sm:p-5 lg:p-6" aria-label={`${profile.label} shortcuts`} transition={{ type: 'spring', stiffness: 300, damping: 32 }}>
               <div className="section-heading mb-3">
                 <div className="flex min-w-0 items-center gap-2.5">
                   <div className="section-icon icon-cyan"><Shapes className="h-4 w-4" /></div>
                   <div className="min-w-0"><h2 className="section-title">Shortcuts</h2><p className="section-subtitle truncate">{profile.label} workspace</p></div>
                 </div>
-                <button type="button" className="shortcut-edit-button" onClick={() => openProfileEditor(profile)} aria-label={`Edit ${profile.label} app shortcuts`} title="Edit app shortcuts"><Pencil className="h-3.5 w-3.5" /></button>
+                <SpringButton type="button" className="shortcut-edit-button" onClick={() => openProfileEditor(profile)} aria-label={`Edit ${profile.label} app shortcuts`} title="Edit app shortcuts"><Pencil className="h-3.5 w-3.5" /></SpringButton>
               </div>
-              <div className="macro-grid grid flex-1 content-start gap-3 sm:grid-cols-2 xl:grid-cols-3">
-                {profile.macros.slice(0, 3).map((macro, index) => {
+              <AnimatePresence mode="wait" initial={false}>
+              <motion.div key={profile.id} layout className="macro-grid grid flex-1 content-start gap-3 sm:grid-cols-2 xl:grid-cols-3" initial={{ opacity: 0, x: 14 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -14 }} transition={{ type: 'spring', stiffness: 340, damping: 30 }}>
+                {profile.macros.map((macro, index) => {
                   const Icon = iconPack === 'phosphor' ? PHOSPHOR_MACRO_ICONS[macro.id] || macro.icon : macro.icon;
                   return (
-                    <button
+                    <SpringButton
                       type="button"
                       key={macro.id}
                       onClick={(event) => {
-                        fireMacro(macro);
+                        void fireMacro(macro);
                         // Clear the browser's pressed/focus styling after a pointer activation.
                         if (event.detail > 0) event.currentTarget.blur();
                       }}
                       className="macro-card group"
+                      disabled={!online || busyMacroId === macro.id}
                       style={{ '--macro-delay': `${index * 35}ms` }}
                     >
                       <div className={`macro-icon ${macro.bg}`}><Icon className={`h-[18px] w-[18px] ${macro.color}`} {...(iconPack === 'phosphor' ? { weight: 'regular' } : {})} /></div>
@@ -1006,12 +1201,13 @@ export default function PulseDeck() {
                         <div className="truncate text-sm font-semibold text-zinc-100">{macro.label}</div>
                         <div className="mt-1 truncate font-mono text-[11px] text-zinc-400">{macro.sub}</div>
                       </div>
-                      <ChevronRight className="macro-arrow h-4 w-4" />
-                    </button>
+                      {busyMacroId === macro.id ? <LoaderCircle className="macro-arrow h-4 w-4 animate-spin" /> : <ChevronRight className="macro-arrow h-4 w-4" />}
+                    </SpringButton>
                   );
                 })}
-              </div>
-            </div>
+              </motion.div>
+              </AnimatePresence>
+            </motion.div>
 
             <article className="surface-card app-launcher-pane" aria-label="Apps">
               <div className="app-launcher-heading">
@@ -1025,11 +1221,11 @@ export default function PulseDeck() {
                   const label = app.label || id;
                   const Icon = app.Icon || LAUNCHER_APPS.find((item) => item.id === id)?.Icon || Shapes;
                   return (
-                  <button type="button" key={id} className="app-launcher-button" onClick={() => launcherEditing ? saveLauncherApps(launcherApps.filter((appId) => appId !== id)) : launchApp({ id, label })} disabled={!launcherEditing && !online} aria-label={launcherEditing ? `Remove ${label}` : `Open ${label} on your PC`} title={launcherEditing ? `Remove ${label}` : `Open ${label}`}>
+                  <SpringButton type="button" key={id} className="app-launcher-button" onClick={() => launcherEditing ? saveLauncherApps(launcherApps.filter((appId) => appId !== id)) : launchApp({ id, label })} disabled={!launcherEditing && !online} aria-label={launcherEditing ? `Remove ${label}` : `Open ${label} on your PC`} title={launcherEditing ? `Remove ${label}` : `Open ${label}`}>
                     <Icon className="h-4 w-4" aria-hidden="true" />
                     <span>{label}</span>
                     {launcherEditing && <X className="launcher-remove-icon h-3 w-3" aria-hidden="true" />}
-                  </button>
+                  </SpringButton>
                 ); })}
                 {launcherEditing && launcherApps.length < appCatalog.length && (
                   <label className="launcher-add-wrap">
@@ -1041,40 +1237,38 @@ export default function PulseDeck() {
                   </label>
                 )}
               </div>
-              <button type="button" className="launcher-edit-toggle" onClick={() => setLauncherEditing((editing) => !editing)} aria-pressed={launcherEditing}>
+              <SpringButton type="button" className="launcher-edit-toggle" onClick={() => setLauncherEditing((editing) => !editing)} aria-pressed={launcherEditing}>
                 {launcherEditing ? <Check className="h-3.5 w-3.5" /> : <Pencil className="h-3.5 w-3.5" />}
                 <span>{launcherEditing ? 'Done' : 'Edit'}</span>
-              </button>
+              </SpringButton>
             </article>
 
-            <article className="surface-card discord-panel p-4 sm:p-5 lg:p-6" aria-label="Discord voice controls">
+            <motion.article layout className={`surface-card discord-panel p-4 sm:p-5 lg:p-6${discordRpc.connected ? ' discord-panel-rpc-active' : ''}`} aria-label="Discord voice controls" whileTap={{ scale: 0.998 }} transition={{ type: 'spring', stiffness: 420, damping: 28 }}>
               <div className="section-heading mb-3">
                 <div className="flex items-center gap-2.5">
                   <div className="section-icon icon-violet"><Headphones className="h-4 w-4" /></div>
                   <div><h2 className="section-title">Discord</h2><p className="section-subtitle">Desktop voice controls</p></div>
                 </div>
-                <span className={`tiny-label ${discordAvailable ? 'discord-ready' : ''}`}>{discordAvailable ? 'READY' : 'OFFLINE'}</span>
+                <div className="flex items-center gap-2">
+                  <span className={`tiny-label ${discordAvailable ? 'discord-ready' : ''}`}>{discordAvailable ? 'READY' : 'OFFLINE'}</span>
+                  {discordRpc.connected
+                    ? <span className="text-[9px] font-semibold text-emerald-300">RPC ON</span>
+                    : <SpringButton type="button" disabled={discordRpcConnecting} onClick={connectDiscordRpc} className="rounded-full border border-violet-400/30 bg-violet-400/10 px-2.5 py-1 text-[10px] font-semibold text-violet-200 hover:bg-violet-400/20 disabled:cursor-wait disabled:opacity-60">{discordRpcConnecting ? 'Waiting for Discord…' : discordRpc.username ? 'Reconnect RPC' : 'Connect RPC'}</SpringButton>}
+                </div>
               </div>
               <div className="discord-controls grid grid-cols-2 gap-2">
-                <button type="button" className={`discord-control-button ${discordMicMuted || discordDeafened ? 'discord-control-active' : ''}`} aria-pressed={discordMicMuted || discordDeafened || undefined} disabled={!online || !discordAvailable || Boolean(discordSelfVoice?.server_muted)} onClick={() => handleDiscord('mute', 'Discord · Toggle microphone mute')}>
-                  <Mic className="h-4 w-4" /><span>{discordSelfVoice?.server_muted ? 'Server muted' : discordMicMuted === null ? 'Toggle mute' : discordMicMuted ? 'Unmute mic' : 'Mute mic'}</span>
-                </button>
-                <button type="button" className={`discord-control-button ${discordDeafened ? 'discord-control-active' : ''}`} aria-pressed={discordDeafened ?? undefined} disabled={!online || !discordAvailable || Boolean(discordSelfVoice?.server_deafened)} onClick={() => handleDiscord('deafen', 'Discord · Toggle deafen')}>
-                  <Headphones className="h-4 w-4" /><span>{discordSelfVoice?.server_deafened ? 'Server deafened' : discordDeafened === null ? 'Toggle deafen' : discordDeafened ? 'Undeafen' : 'Deafen'}</span>
-                </button>
+                <motion.button layout type="button" className={`discord-control-button ${discordMicMuted || discordDeafened ? 'discord-control-active' : ''}`} aria-pressed={discordMicMuted || discordDeafened || undefined} disabled={!online || !discordAvailable || Boolean(discordSelfVoice?.server_muted)} onClick={() => handleDiscord('mute', 'Discord · Toggle microphone mute')} whileHover={!online || !discordAvailable ? undefined : { y: -1 }} whileTap={!online || !discordAvailable ? undefined : { scale: 0.97, y: 1 }} transition={{ type: 'spring', stiffness: 460, damping: 28 }}>
+                  <Mic className="h-4 w-4" />
+                  <AnimatePresence mode="wait" initial={false}><motion.span key={discordSelfVoice?.server_muted ? 'server-muted' : discordMicMuted ? 'muted' : 'unmuted'} initial={{ opacity: 0, y: 5 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -5 }} transition={{ duration: 0.14 }}>{discordSelfVoice?.server_muted ? 'Server muted' : discordMicMuted === null ? 'Toggle mute' : discordMicMuted ? 'Unmute mic' : 'Mute mic'}</motion.span></AnimatePresence>
+                </motion.button>
+                <motion.button layout type="button" className={`discord-control-button ${discordDeafened ? 'discord-control-active' : ''}`} aria-pressed={discordDeafened ?? undefined} disabled={!online || !discordAvailable || Boolean(discordSelfVoice?.server_deafened)} onClick={() => handleDiscord('deafen', 'Discord · Toggle deafen')} whileHover={!online || !discordAvailable ? undefined : { y: -1 }} whileTap={!online || !discordAvailable ? undefined : { scale: 0.97, y: 1 }} transition={{ type: 'spring', stiffness: 460, damping: 28 }}>
+                  <Headphones className="h-4 w-4" />
+                  <AnimatePresence mode="wait" initial={false}><motion.span key={discordSelfVoice?.server_deafened ? 'server-deafened' : discordDeafened ? 'deafened' : 'undeafened'} initial={{ opacity: 0, y: 5 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -5 }} transition={{ duration: 0.14 }}>{discordSelfVoice?.server_deafened ? 'Server deafened' : discordDeafened === null ? 'Toggle deafen' : discordDeafened ? 'Undeafen' : 'Deafen'}</motion.span></AnimatePresence>
+                </motion.button>
               </div>
-              <button
-                type="button"
-                className="discord-control-button mt-2 w-full"
-                disabled={!online || !discordVoice.configured || !discordVoice.channel}
-                onClick={() => handleDiscord('disconnect', 'Disconnecting from Discord voice')}
-              >
-                <PhoneOff className="h-4 w-4" />
-                <span>{discordVoice.channel ? `Disconnect from ${discordVoice.channel}` : 'Disconnect from voice'}</span>
-              </button>
               <div className="discord-voice-status" aria-live="polite">
                 {!discordVoice.configured ? (
-                  <p className="discord-empty-state">Set up the optional Discord bot to enable voice channel controls.</p>
+                  <p className="discord-empty-state">{discordRpc.connected ? 'Discord RPC controls your mic and deafen. The optional bot adds server voice status and member lists.' : discordRpc.error ? `RPC authorization exists, but the local connection is unavailable: ${discordRpc.error}` : discordRpc.username ? `Authorized as ${discordRpc.username}, but RPC is offline. Open Discord desktop on the PC running the PulseDeck backend, then reconnect.` : 'Connect RPC for direct Discord mic and deafen controls. The optional bot adds server voice status and member lists.'}</p>
                 ) : discordVoice.connection === 'error' ? (
                   <p className="discord-empty-state">Discord monitor could not connect. Check the bot token and enabled intents.</p>
                 ) : discordVoice.connection !== 'connected' ? (
@@ -1101,9 +1295,10 @@ export default function PulseDeck() {
                   <p className="discord-empty-state">You’re not in a server voice channel visible to the bot.</p>
                 )}
               </div>
-            </article>
+              {discordRpcConnectError && <p className="discord-empty-state mt-2 text-rose-300" role="alert">RPC connection failed: {discordRpcConnectError}</p>}
+            </motion.article>
           </section>
-        </div>
+        </motion.div>
       </div>
     </main>
   );

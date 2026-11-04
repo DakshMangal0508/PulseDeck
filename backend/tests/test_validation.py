@@ -1,9 +1,11 @@
 import unittest
 import re
+import sys
 from pathlib import Path
 
 from pydantic import ValidationError
 
+sys.path.insert(0, str(Path(__file__).parents[1]))
 from validation import ALLOWED_SHORTCUTS, HotkeyPayload, MediaPayload, VolumePayload
 
 
@@ -39,7 +41,7 @@ class PayloadValidationTests(unittest.TestCase):
         }.issubset(ALLOWED_SHORTCUTS))
 
     def test_profile_shortcuts_match_the_backend_allowlist(self):
-        profile_source = Path(__file__).parents[1].joinpath("profiles.js").read_text(encoding="utf-8")
+        profile_source = Path(__file__).parents[2].joinpath("frontend", "profiles.js").read_text(encoding="utf-8")
         shortcuts = set(re.findall(r"shortcut:\s*'([^']+)'", profile_source)) - {"duck_spotify"}
         self.assertTrue(shortcuts)
         self.assertTrue(shortcuts.issubset(ALLOWED_SHORTCUTS), shortcuts - ALLOWED_SHORTCUTS)

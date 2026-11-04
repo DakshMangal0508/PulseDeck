@@ -1,6 +1,18 @@
 import { SkipForward, SkipBack, Volume2, Layers, Sliders, Gamepad2, Terminal, Crop, Sun, Video, Zap, Check } from 'lucide-react';
 
 const PROFILES = {
+  windows: {
+    id: 'windows',
+    label: 'Windows',
+    app: 'explorer.exe',
+    matchApps: ['desktop'],
+    icon: Layers,
+    accent: 'from-blue-500/20 via-sky-500/10 to-transparent',
+    macros: [
+      { id: 'screenshot', label: 'Screenshot', sub: 'Windows + Print Screen', shortcut: 'windows+print screen', icon: Sun, color: 'text-sky-400', bg: 'bg-sky-500/10 border-sky-500/20' },
+      { id: 'lock_pc', label: 'Lock PC', sub: 'Windows + L', shortcut: 'windows+l', icon: Check, color: 'text-amber-400', bg: 'bg-amber-500/10 border-amber-500/20' },
+    ]
+  },
   gaming: {
     id: 'gaming',
     label: 'Gaming',

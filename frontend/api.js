@@ -1,33 +1,43 @@
-export const API_BASE = `${window.location.protocol}//${window.location.hostname}:8000`;
+const configuredApiBase = (import.meta.env.VITE_API_BASE_URL || '').trim().replace(/\/+$/, '');
+export const API_BASE = configuredApiBase || `${window.location.protocol}//${window.location.hostname}:8000`;
 const TOKEN_KEY = 'pulsedeck-api-token';
 const USERNAME_KEY = 'pulsedeck-account-username';
 
 export function getApiToken() {
   try {
-    return window.localStorage.getItem(TOKEN_KEY) || '';
+    return window.localStorage.getItem(TOKEN_KEY) || window.sessionStorage.getItem(TOKEN_KEY) || '';
   } catch {
     return '';
   }
 }
 
-export function saveApiToken(token) {
+export function saveApiToken(token, remember = true) {
   try {
-    window.localStorage.setItem(TOKEN_KEY, token.trim());
+    if (remember) {
+      window.localStorage.setItem(TOKEN_KEY, token.trim());
+      window.sessionStorage.removeItem(TOKEN_KEY);
+    } else {
+      window.localStorage.removeItem(TOKEN_KEY);
+      window.sessionStorage.setItem(TOKEN_KEY, token.trim());
+    }
   } catch {
     // The session still works in browsers where local storage is disabled.
   }
 }
 
-export function saveAccountSession(token, username) {
-  saveApiToken(token);
+export function saveAccountSession(token, username, remember = true) {
+  saveApiToken(token, remember);
   try {
-    window.localStorage.setItem(USERNAME_KEY, username);
+    const storage = remember ? window.localStorage : window.sessionStorage;
+    const otherStorage = remember ? window.sessionStorage : window.localStorage;
+    storage.setItem(USERNAME_KEY, username);
+    otherStorage.removeItem(USERNAME_KEY);
   } catch { /* The session still works if local storage is unavailable. */ }
 }
 
 export function getAccountUsername() {
   try {
-    return window.localStorage.getItem(USERNAME_KEY) || '';
+    return window.localStorage.getItem(USERNAME_KEY) || window.sessionStorage.getItem(USERNAME_KEY) || '';
   } catch {
     return '';
   }
@@ -37,6 +47,8 @@ export function clearAccountSession() {
   try {
     window.localStorage.removeItem(TOKEN_KEY);
     window.localStorage.removeItem(USERNAME_KEY);
+    window.sessionStorage.removeItem(TOKEN_KEY);
+    window.sessionStorage.removeItem(USERNAME_KEY);
   } catch { /* Keep the in-memory logout state if local storage is unavailable. */ }
 }
 
@@ -47,7 +59,11 @@ export async function authRequest(endpoint, body) {
     ...(body ? { body: JSON.stringify(body) } : {}),
   });
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.detail || `Request failed (${response.status})`);
+  if (!response.ok) {
+    const error = new Error(data.detail || `Request failed (${response.status})`);
+    error.status = response.status;
+    throw error;
+  }
   return data;
 }
 
@@ -70,7 +86,9 @@ export async function apiRequest(endpoint, { method = 'GET', body, timeoutMs = 8
         const data = await response.json();
         if (data.detail) message = data.detail;
       } catch { /* Keep the status message. */ }
-      throw new Error(message);
+      const error = new Error(message);
+      error.status = response.status;
+      throw error;
     }
     return await response.json();
   } catch (error) {

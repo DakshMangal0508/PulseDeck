@@ -5,13 +5,15 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "vite build --configLoader runner",
     "preview": "vite preview",
-    "check": "npm run build && python -m unittest discover -s tests"
+    "check": "npm run build && python -m unittest discover -s ../backend/tests"
   },
   "dependencies": {
     "@phosphor-icons/react": "^2.1.10",
     "lucide-react": "^0.468.0",
+    "motion": "^14.9.1",
+    "qrcode.react": "^4.2.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },

@@ -1,15 +1,48 @@
+import re
 from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
 
-# Keep the executable shortcuts explicit. The browser's macro list is not a security boundary.
+# Keep presets explicit and custom actions limited to one validated key chord.
 ALLOWED_SHORTCUTS = {
     "alt+f10", "alt+r", "f15", "windows+print screen", "windows+l",
     "shift+m", "m", "r", "v", "ctrl+shift+c", "ctrl+shift+v",
     "ctrl+`",
     "ctrl+z", "ctrl+shift+z", "ctrl+shift+g", "ctrl+shift+p", "ctrl+s",
 }
+
+SHORTCUT_MODIFIERS = ("ctrl", "alt", "shift", "windows")
+SHORTCUT_KEY_NAMES = {
+    "space", "enter", "tab", "esc", "escape", "backspace", "delete", "insert",
+    "home", "end", "page up", "page down", "up", "down", "left", "right",
+    "print screen", "caps lock", "num lock", "scroll lock", "pause", "`",
+    "-", "=", "[", "]", "\\", ";", "'", ",", ".", "/",
+}
+
+
+def _is_custom_shortcut_chord(chord: str) -> bool:
+    parts = [part.strip().lower() for part in chord.split("+")]
+    if not parts or any(not part for part in parts):
+        return False
+    key = parts[-1]
+    modifiers = parts[:-1]
+    if len(modifiers) > len(SHORTCUT_MODIFIERS) or len(set(modifiers)) != len(modifiers):
+        return False
+    if any(modifier not in SHORTCUT_MODIFIERS for modifier in modifiers):
+        return False
+    valid_key = (
+        re.fullmatch(r"[a-z0-9]", key)
+        or re.fullmatch(r"f(?:[1-9]|1[0-9]|2[0-4])", key)
+        or key in SHORTCUT_KEY_NAMES
+    )
+    return bool(valid_key)
+
+
+def is_custom_shortcut(shortcut: str) -> bool:
+    """Accept one chord or a short comma-separated sequence of chords."""
+    chords = [chord.strip() for chord in shortcut.split(",")]
+    return 1 <= len(chords) <= 5 and all(_is_custom_shortcut_chord(chord) for chord in chords)
 
 
 class Payload(BaseModel):
@@ -19,6 +52,10 @@ class Payload(BaseModel):
 class HotkeyPayload(Payload):
     shortcut: str = Field(min_length=1, max_length=40)
     label: str = Field(default="", max_length=80)
+
+
+class ShortcutRecordingModifierPayload(Payload):
+    win: bool
 
 
 class AppLaunchPayload(Payload):

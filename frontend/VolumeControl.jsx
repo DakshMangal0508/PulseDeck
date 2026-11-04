@@ -1,5 +1,6 @@
 import React from 'react';
-import { Volume2, VolumeX } from 'lucide-react';
+import { VolumeX } from 'lucide-react';
+import { motion } from 'motion/react';
 
 function TouchVolumePill({ label, target, value, onChange, colorClass, icon: Icon }) {
   return (
@@ -17,7 +18,7 @@ function TouchVolumePill({ label, target, value, onChange, colorClass, icon: Ico
         </div>
         <span className="font-mono text-[10px] font-semibold tabular-nums text-white/75">{value == null ? 'N/A' : `${value}%`}</span>
       </div>
-      <input
+      <motion.input
         aria-label={`${label} volume`}
         aria-valuetext={value == null ? 'Unavailable' : `${value}%`}
         type="range"
@@ -28,6 +29,8 @@ function TouchVolumePill({ label, target, value, onChange, colorClass, icon: Ico
         disabled={value == null}
         onChange={(event) => onChange(target, Number(event.target.value))}
         className="volume-range absolute inset-0 z-20 h-full w-full cursor-ew-resize disabled:cursor-not-allowed"
+        whileTap={{ scale: 1.012 }}
+        transition={{ type: 'spring', stiffness: 480, damping: 24 }}
       />
     </div>
   );

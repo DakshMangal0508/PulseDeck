@@ -50,7 +50,7 @@ Use consistent pads with an icon, action name, and shortcut label. Keep the sele
 - Dark signal accent: orange `#ff3d00`; light signal accent: purple `#ba55d3`.
 - Status: green for connected/active; amber or rose for warnings and destructive actions.
 - Typography: Doto for the deck, Silkscreen for section headings, and a readable system font for native app-picker options; use tabular numerals for time and percentages.
-- Motion: brief press feedback; respect reduced-motion settings.
+- Motion: brief press feedback and animated active states.
 - Artwork: small thumbnail with restrained color tint, never a large decorative background.
 
 ## Responsive rules
