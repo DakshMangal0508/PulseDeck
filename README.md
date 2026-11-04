@@ -12,7 +12,8 @@ PulseDeck is a React control panel for Spotify playback, Discord voice controls,
 
 - Windows 10/11
 - Python 3.10 or newer
-- Node.js 18 or newer
+- Node.js 22 or newer
+- Android Studio and Android SDK for local APK builds
 
 ## Build and run PulseDeck
 
@@ -30,6 +31,18 @@ Pop-Location
 
 For local use, the backend serves the built interface and API on port 8000. PulseDeck opens a separate account page for setup and sign-in. Create the single account there the first time with a username and a password of at least 10 characters. The PC remembers its sign-in across Windows restarts. For a split deployment, remote first-time account setup is disabled by default; enable it with `PULSEDECK_ALLOW_REMOTE_SETUP=true` only while setting up a private deployment.
 
+## Android app
+
+The Android project is in `frontend/android` and wraps the same React interface using Capacitor. To sync frontend changes into the native project, run `npm ci`, then `npm run android:sync` from `frontend/`. Open it in Android Studio with `npm run android:open`, or build a debug APK from `frontend/android` with `gradlew.bat assembleDebug`.
+
+On first launch, enter one of the local addresses shown in the PC app's **Connection** panel, such as `http://192.168.1.25:8000`. The app saves that address on the phone. For now, the phone and PC must be on the same Wi-Fi; USB support is a later step. The PC must have been set up and the account created there first.
+
+## GitHub releases
+
+Pushing a version tag such as `v0.1.0` runs `.github/workflows/release.yml`. It builds a per-user Windows installer and an Android APK, then attaches the artifacts to a GitHub Release. The installer places the program under `%LOCALAPPDATA%\Programs\PulseDeck`; account data remains under `%LOCALAPPDATA%\PulseDeck` when the app is upgraded or uninstalled.
+
+For an installable Android APK that can be upgraded across releases, add the signing secrets `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, and `ANDROID_KEY_PASSWORD` to the GitHub repository. Without those secrets, the workflow uploads a debug-signed preview APK; Android may require uninstalling that preview before installing a later one. A Play Store release also needs a production signing key and store listing.
+
 Keep the backend running in your signed-in Windows session. To start it hidden, run `backend\Start-PulseDeck.ps1`; logs go to `backend\backend.log` and `backend\backend-error.log`. To start it at Windows sign-in, run `backend\Install-PulseDeck-AutoStart.ps1`; remove the task with `backend\Uninstall-PulseDeck-AutoStart.ps1`. The app is available at `http://localhost:8000` and, on the same trusted network, from your phone. Windows media and volume controls require the backend to run as your signed-in user, not as a Windows service.
 
 ## Deploy the frontend and backend separately
@@ -46,7 +59,7 @@ Mount persistent storage and set `PULSEDECK_DATA_DIR` to it. PulseDeck stores th
 
 For Spotify OAuth, set `PULSEDECK_SPOTIFY_REDIRECT_URI` to `https://api.example.com/api/spotify/callback` and register that exact URL in the Spotify Developer Dashboard. For Discord RPC, register the backend's configured `PULSEDECK_DISCORD_REDIRECT_URI` in the Discord application and set its client credentials on the backend. The Discord IPC connection still requires the backend to run on the Windows PC where Discord Desktop is open.
 
-The host still accepts only the shortcuts listed in `backend/validation.py`, known media actions, and Windows audio session identifiers returned by the status endpoint, plus the master volume target. The Volume mixer lists apps that currently have an active Windows audio session; an app disappears when its session stops producing audio.
+The host still accepts only the shortcuts listed in `backend/validation.py`, known media actions, and Windows audio session identifiers returned by the status endpoint, plus the master volume target. The Volume mixer lists apps with a Windows audio session, including sessions that remain available while an app is quiet or paused.
 
 ### Account recovery
 
@@ -119,7 +132,7 @@ PulseDeck uses its dark theme and Phosphor shortcut icons by default.
 
 Sports scores are optional. Choose **Add team score** below the date to follow a football or cricket team; football also asks for a league. The selection is saved in that browser, refreshes every minute, and can be changed or removed from the score card. Scores come from ESPN's public football scoreboard and ESPNcricinfo's current-match feed, so a score appears only when the selected team has a recent/upcoming football fixture or a current cricket match in the feed. The PC host needs internet access while the feature is in use.
 
-Use **Manage** beside the workspace tabs to rename the selected profile, edit or remove its shortcut cards, and set app names for automatic profile switching. **Add profile** creates another workspace. Profile edits are saved in that browser's local storage. Choose a preset action or record a sequence of up to five key chords with Ctrl, Alt, Shift, and Win modifiers. If the host does not detect the Windows key, click **Win** to add it to the next chord. While recording, keyboard input is suppressed on the host PC so the chord does not also trigger its normal action. Pause for four seconds to finish; press Escape to cancel. Recording automatically stops after 20 seconds. Arbitrary text is not accepted.
+Use **Manage** beside the workspace tabs to rename the selected profile, edit or remove its shortcut cards, and set app names for automatic profile switching. **Add profile** creates another workspace. Signed-in profile and shortcut edits sync through the host account and are cached in each browser for offline access; the first signed-in browser also uploads its existing local profiles. Choose a preset action or record a sequence of up to five key chords with Ctrl, Alt, Shift, and Win modifiers. If the host does not detect the Windows key, click **Win** to add it to the next chord. While recording, keyboard input is suppressed on the host PC so the chord does not also trigger its normal action. Pause for four seconds to finish; press Escape to cancel. Recording automatically stops after 20 seconds. Arbitrary text is not accepted.
 
 The **Open apps** pane launches built-in apps and shortcuts discovered from the host's Windows Start Menu. Select **Edit**, then **Add app** to choose another entry; the app list comes from the host and your selected launcher list is saved in that browser. Built-in launch requests use a fixed application allowlist; Start Menu entries launch only their discovered shortcut.
 

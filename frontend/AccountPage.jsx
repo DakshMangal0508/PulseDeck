@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import { Activity, Check, KeyRound, LoaderCircle, Smartphone, X } from 'lucide-react';
-import { apiRequest, authRequest, clearAccountSession, getApiToken, saveAccountSession } from './api.js';
+import { apiRequest, authRequest, clearAccountSession, clearApiBase, getApiToken, isNativeApp, saveAccountSession } from './api.js';
 import SpringButton from './SpringButton.jsx';
 
 const accountItemVariants = {
@@ -246,6 +246,7 @@ export default function AccountPage() {
           {hostStatus === 'searching' ? <LoaderCircle className="animate-spin" /> : hostStatus === 'connected' ? <Check /> : <X />}
           <span>{hostStatus === 'searching' ? 'Searching for PulseDeck host…' : hostStatus === 'connected' ? 'Host connected · local network' : 'PulseDeck host offline · retrying'}</span>
         </motion.div>
+        {isNativeApp && <button type="button" className="account-forgot-button" onClick={() => { clearApiBase(); clearAccountSession(); window.location.reload(); }}>Change PC address</button>}
       </motion.section>
     </main>
   );

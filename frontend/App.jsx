@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import SpringButton from './SpringButton.jsx';
-import { API_BASE, apiRequest, clearAccountSession, getApiToken } from './api.js';
+import { API_BASE, apiRequest, clearAccountSession, clearApiBase, getApiToken, isNativeApp } from './api.js';
 import { QRCodeSVG } from 'qrcode.react';
 import PROFILES from './profiles.js';
 import TouchVolumePill from './VolumeControl.jsx';
@@ -49,10 +49,9 @@ function formatShortcutLabel(shortcut) {
     || shortcut.split(',').map((chord) => chord.trim().split('+').map(formatKey).join(' + ')).join(' → ');
 }
 
-function loadProfiles() {
+function mergeProfiles(saved) {
   const defaults = Object.values(PROFILES);
   try {
-    const saved = JSON.parse(window.localStorage.getItem('pulsedeck-profiles') || 'null');
     if (!Array.isArray(saved)) return defaults;
     const savedById = new Map(saved.filter((item) => item && typeof item.id === 'string').map((item) => [item.id, item]));
     const merged = defaults.map((base) => {
@@ -71,6 +70,18 @@ function loadProfiles() {
     });
     return merged;
   } catch { return defaults; }
+}
+
+function loadProfiles() {
+  try { return mergeProfiles(JSON.parse(window.localStorage.getItem('pulsedeck-profiles') || 'null')); }
+  catch { return Object.values(PROFILES); }
+}
+
+function serializeProfiles(profiles) {
+  return profiles.map(({ icon, ...item }) => ({
+    ...item,
+    macros: item.macros.map(({ icon: macroIcon, ...macro }) => macro),
+  }));
 }
 
 const PHOSPHOR_PROFILE_ICONS = {
@@ -126,6 +137,8 @@ function AudioWaveform({ active }) {
 
 export default function PulseDeck() {
   const [profiles, setProfiles] = useState(loadProfiles);
+  const profileSyncReady = useRef(false);
+  const profileSyncTimer = useRef(null);
   const [launcherApps, setLauncherApps] = useState(() => {
     try {
       const saved = JSON.parse(window.localStorage.getItem('pulsedeck-launcher-apps') || 'null');
@@ -257,7 +270,6 @@ export default function PulseDeck() {
   const observedDiscordDeafened = discordRpc.connected ? Boolean(discordRpc.deaf) : discordSelfVoice ? discordSelfVoice.self_deafened || discordSelfVoice.server_deafened : null;
   const discordMicMuted = discordControlOverrides.mute ?? observedDiscordMicMuted;
   const discordDeafened = discordControlOverrides.deafen ?? observedDiscordDeafened;
-
   useEffect(() => {
     if (!discordRpc.connected && !discordSelfVoice) return;
     setDiscordControlOverrides((current) => ({
@@ -450,14 +462,35 @@ export default function PulseDeck() {
   }, []);
 
   useEffect(() => {
+    let active = true;
+    profileSyncReady.current = false;
+    if (!apiToken) return () => { active = false; };
+    apiRequest('/api/preferences').then((data) => {
+      if (!active) return;
+      if (Array.isArray(data.profiles)) setProfiles(mergeProfiles(data.profiles));
+      else {
+        const cachedProfiles = serializeProfiles(profiles);
+        apiRequest('/api/preferences', { method: 'PUT', body: { profiles: cachedProfiles } }).catch(() => {});
+      }
+      profileSyncReady.current = true;
+    }).catch(() => {
+      if (active) profileSyncReady.current = true;
+    });
+    return () => { active = false; };
+  }, [apiToken]);
+
+  useEffect(() => {
     try {
-      const serializable = profiles.map(({ icon, ...item }) => ({
-        ...item,
-        macros: item.macros.map(({ icon: macroIcon, ...macro }) => macro),
-      }));
+      const serializable = serializeProfiles(profiles);
       window.localStorage.setItem('pulsedeck-profiles', JSON.stringify(serializable));
+      if (!apiToken || !profileSyncReady.current) return;
+      window.clearTimeout(profileSyncTimer.current);
+      profileSyncTimer.current = window.setTimeout(() => {
+        apiRequest('/api/preferences', { method: 'PUT', body: { profiles: serializable } }).catch(() => {});
+      }, 400);
     } catch { /* Keep profile edits in memory when browser storage is unavailable. */ }
-  }, [profiles]);
+    return () => window.clearTimeout(profileSyncTimer.current);
+  }, [profiles, apiToken]);
 
   const openProfileEditor = (item = null) => {
     setRecordingShortcutIndex(null);
@@ -707,6 +740,13 @@ export default function PulseDeck() {
     window.localStorage.setItem('pulsedeck-launcher-apps', JSON.stringify(nextApps));
   };
 
+  const handleLauncherClick = (event, id, label) => {
+    const button = event.currentTarget;
+    button.dataset.hoverSuppressed = 'true';
+    if (launcherEditing) saveLauncherApps(launcherApps.filter((appId) => appId !== id));
+    else launchApp({ id, label });
+  };
+
   const handleMedia = (action, label) => {
     if (navigator.vibrate) navigator.vibrate(15);
     const previousPlaying = isPlaying;
@@ -876,6 +916,7 @@ export default function PulseDeck() {
           </div>
           <div className="connection-actions">
             <a href="/account?recovery=setup" className="connection-action">Recovery email</a>
+            {isNativeApp && <SpringButton type="button" className="connection-action" onClick={() => { clearApiBase(); clearAccountSession(); window.location.reload(); }}>Change PC</SpringButton>}
             <SpringButton type="button" className="connection-action" onClick={logoutAccount}>Sign out</SpringButton>
           </div>
           <div className="flex w-full flex-wrap items-center gap-4 border-t border-white/[0.06] pt-3">
@@ -1221,7 +1262,7 @@ export default function PulseDeck() {
                   const label = app.label || id;
                   const Icon = app.Icon || LAUNCHER_APPS.find((item) => item.id === id)?.Icon || Shapes;
                   return (
-                  <SpringButton type="button" key={id} className="app-launcher-button" onClick={() => launcherEditing ? saveLauncherApps(launcherApps.filter((appId) => appId !== id)) : launchApp({ id, label })} disabled={!launcherEditing && !online} aria-label={launcherEditing ? `Remove ${label}` : `Open ${label} on your PC`} title={launcherEditing ? `Remove ${label}` : `Open ${label}`}>
+                  <SpringButton type="button" key={id} className="app-launcher-button" onClick={(event) => handleLauncherClick(event, id, label)} onPointerDown={(event) => { delete event.currentTarget.dataset.hoverSuppressed; }} onPointerLeave={(event) => { delete event.currentTarget.dataset.hoverSuppressed; }} onKeyDown={(event) => { delete event.currentTarget.dataset.hoverSuppressed; }} disabled={!launcherEditing && !online} aria-label={launcherEditing ? `Remove ${label}` : `Open ${label} on your PC`} title={launcherEditing ? `Remove ${label}` : `Open ${label}`}>
                     <Icon className="h-4 w-4" aria-hidden="true" />
                     <span>{label}</span>
                     {launcherEditing && <X className="launcher-remove-icon h-3 w-3" aria-hidden="true" />}

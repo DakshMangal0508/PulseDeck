@@ -1,5 +1,40 @@
+import { Capacitor } from '@capacitor/core';
+
 const configuredApiBase = (import.meta.env.VITE_API_BASE_URL || '').trim().replace(/\/+$/, '');
-export const API_BASE = configuredApiBase || `${window.location.protocol}//${window.location.hostname}:8000`;
+const API_BASE_STORAGE_KEY = 'pulsedeck-backend-url';
+export const isNativeApp = Capacitor.isNativePlatform();
+
+function readSavedApiBase() {
+  try {
+    return (window.localStorage.getItem(API_BASE_STORAGE_KEY) || '').trim().replace(/\/+$/, '');
+  } catch {
+    return '';
+  }
+}
+
+export function normalizeApiBase(value) {
+  const parsed = new URL(value.trim());
+  if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('Use an HTTP or HTTPS address.');
+  if (parsed.pathname !== '/') throw new Error('Enter the PC address only, without a path.');
+  if (parsed.username || parsed.password || parsed.search || parsed.hash) throw new Error('Enter only the PC address, without a username, password, query, or fragment.');
+  return parsed.toString().replace(/\/+$/, '');
+}
+
+export let API_BASE = isNativeApp
+  ? readSavedApiBase() || configuredApiBase
+  : configuredApiBase || `${window.location.protocol}//${window.location.hostname}:8000`;
+
+export function setApiBase(value) {
+  const normalized = normalizeApiBase(value);
+  try { window.localStorage.setItem(API_BASE_STORAGE_KEY, normalized); } catch { /* Keep the host for this app session. */ }
+  API_BASE = normalized;
+}
+
+export function clearApiBase() {
+  try { window.localStorage.removeItem(API_BASE_STORAGE_KEY); } catch { /* Continue with the in-memory reset. */ }
+  API_BASE = '';
+}
+
 const TOKEN_KEY = 'pulsedeck-api-token';
 const USERNAME_KEY = 'pulsedeck-account-username';
 

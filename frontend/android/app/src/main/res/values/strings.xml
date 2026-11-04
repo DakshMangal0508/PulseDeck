@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">PulseDeck</string>
+    <string name="title_activity_main">PulseDeck</string>
+    <string name="package_name">com.pulsedeck.app</string>
+    <string name="custom_url_scheme">com.pulsedeck.app</string>
+</resources>

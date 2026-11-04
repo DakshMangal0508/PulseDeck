@@ -4,7 +4,8 @@ import { createRoot } from 'react-dom/client';
 import PulseDeck from './App.jsx';
 import AccountPage from './AccountPage.jsx';
 import ErrorPage from './ErrorPage.jsx';
-import { API_BASE, saveAccountSession } from './api.js';
+import NativeConnect from './NativeConnect.jsx';
+import { API_BASE, isNativeApp, saveAccountSession } from './api.js';
 import './style.css';
 
 function AppEntry() {
@@ -16,6 +17,7 @@ function AppEntry() {
   const dashboardPath = normalizedPath === '/' || normalizedPath === '/index.html';
   const [pairStatus, setPairStatus] = useState(() => pairingCode ? 'pairing' : 'ready');
   const [pairError, setPairError] = useState('');
+  const [nativeBackendConfigured, setNativeBackendConfigured] = useState(() => Boolean(API_BASE));
   const pairingRequest = useRef(null);
 
   useEffect(() => {
@@ -60,6 +62,10 @@ function AppEntry() {
         </section>
       </main>
     );
+  }
+
+  if (isNativeApp && !nativeBackendConfigured) {
+    return <NativeConnect onConnected={() => setNativeBackendConfigured(true)} />;
   }
 
   if (accountPath || recoveryLink) return <AccountPage />;
