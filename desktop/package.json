@@ -1,0 +1,11 @@
+{
+  "name": "pulsedeck-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build:web": "npm --prefix ../frontend run build",
+    "build:backend": "powershell -NoProfile -ExecutionPolicy Bypass -File ./build-backend.ps1",
+    "tauri:dev": "cargo tauri dev",
+    "tauri:build": "cargo tauri build"
+  }
+}

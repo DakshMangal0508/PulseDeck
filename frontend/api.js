@@ -1,5 +1,8 @@
 const configuredApiBase = (import.meta.env.VITE_API_BASE_URL || '').trim().replace(/\/+$/, '');
-export const API_BASE = configuredApiBase || `${window.location.protocol}//${window.location.hostname}:8000`;
+const isTauriDesktop = window.location.hostname === 'tauri.localhost' || window.location.protocol === 'tauri:';
+export const API_BASE = configuredApiBase || (isTauriDesktop
+  ? 'http://127.0.0.1:8000'
+  : `${window.location.protocol}//${window.location.hostname}:8000`);
 const TOKEN_KEY = 'pulsedeck-api-token';
 const USERNAME_KEY = 'pulsedeck-account-username';
 
@@ -41,6 +44,13 @@ export function getAccountUsername() {
   } catch {
     return '';
   }
+}
+
+export function updateAccountUsername(username) {
+  try {
+    const storage = window.localStorage.getItem(TOKEN_KEY) ? window.localStorage : window.sessionStorage;
+    storage.setItem(USERNAME_KEY, username);
+  } catch { /* The active session remains valid when storage is unavailable. */ }
 }
 
 export function clearAccountSession() {

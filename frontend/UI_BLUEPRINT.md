@@ -40,7 +40,7 @@ Use the device's local time and date. Treat the clock as a quiet orientation aid
 
 ### Shortcuts, apps, and Discord
 
-Use consistent pads with an icon, action name, and shortcut label. Keep the selected profile obvious. Make each pad at least 48 px tall, and make pressed/disabled states distinct. Keep auto-switch as a compact utility control. The app launcher includes built-in apps and host Start Menu entries, with an edit mode for choosing which appear. Discord mute/deafen buttons show immediate red feedback on panel clicks and reconcile against voice state when the optional bot is connected.
+Use consistent pads with an icon, action name, and shortcut label. Keep the selected profile obvious. Make each pad at least 48 px tall, and make pressed/disabled states distinct. Keep auto-switch as a compact utility control. The app launcher includes built-in apps and host Start Menu entries, with an edit mode for choosing which appear. Discord mute/deafen buttons send the configured Discord keybinds and show immediate feedback; bot voice status is optional.
 
 ## Visual system
 

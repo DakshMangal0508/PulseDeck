@@ -11,7 +11,6 @@ import secrets
 import socket
 import sqlite3
 import smtplib
-import struct
 import subprocess
 import threading
 import time
@@ -25,7 +24,6 @@ import uuid
 import re
 from email.message import EmailMessage
 import win32con
-import win32file
 from contextlib import asynccontextmanager, contextmanager
 import keyboard
 import psutil
@@ -65,7 +63,24 @@ from validation import (
 
 def load_backend_env():
     """Load local backend settings without overriding process environment."""
-    env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    config_dir = os.getenv("PULSEDECK_CONFIG_DIR", "").strip()
+    if config_dir:
+        os.makedirs(config_dir, exist_ok=True)
+        env_path = os.path.join(config_dir, ".env")
+        if not os.path.exists(env_path):
+            with open(env_path, "x", encoding="utf-8") as env_file:
+                env_file.write(
+                    "# Gmail SMTP for PulseDeck recovery email. Add your Gmail address and app password.\n"
+                    "PULSEDECK_SMTP_HOST=smtp.gmail.com\n"
+                    "PULSEDECK_SMTP_PORT=587\n"
+                    "PULSEDECK_SMTP_USERNAME=\n"
+                    "PULSEDECK_SMTP_PASSWORD=\n"
+                    "PULSEDECK_SMTP_FROM=\n"
+                    "PULSEDECK_SMTP_USE_SSL=false\n"
+                    "PULSEDECK_SMTP_STARTTLS=true\n"
+                )
+    else:
+        env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
     try:
         with open(env_path, "r", encoding="utf-8-sig") as env_file:
             for line in env_file:
@@ -93,12 +108,6 @@ DISCORD_BOT_TOKEN = "".join(
 )
 DISCORD_USER_ID_VALUE = os.getenv("PULSEDECK_DISCORD_USER_ID", "").strip()
 DISCORD_USER_ID = int(DISCORD_USER_ID_VALUE) if DISCORD_USER_ID_VALUE.isdecimal() else None
-DISCORD_RPC_CLIENT_ID = os.getenv("PULSEDECK_DISCORD_CLIENT_ID", "").strip()
-DISCORD_RPC_CLIENT_SECRET = os.getenv("PULSEDECK_DISCORD_CLIENT_SECRET", "").strip()
-DISCORD_RPC_REDIRECT_URI = os.getenv(
-    "PULSEDECK_DISCORD_REDIRECT_URI",
-    "http://localhost:8000",
-).strip()
 FRONTEND_PUBLIC_URL = os.getenv("PULSEDECK_FRONTEND_URL", "").strip().rstrip("/")
 SMTP_HOST = os.getenv("PULSEDECK_SMTP_HOST", "").strip()
 SMTP_PORT = int(os.getenv("PULSEDECK_SMTP_PORT", "587"))
@@ -109,10 +118,6 @@ SMTP_USE_SSL = os.getenv("PULSEDECK_SMTP_USE_SSL", "false").strip().casefold() i
 SMTP_STARTTLS = os.getenv("PULSEDECK_SMTP_STARTTLS", "true").strip().casefold() in {"1", "true", "yes", "on"}
 EMAIL_RECOVERY_CONFIGURED = bool(SMTP_HOST and SMTP_FROM and (SMTP_USE_SSL or SMTP_STARTTLS))
 ALLOW_REMOTE_ACCOUNT_SETUP = os.getenv("PULSEDECK_ALLOW_REMOTE_SETUP", "false").strip().casefold() in {"1", "true", "yes", "on"}
-DISCORD_RPC_CLIENT = None
-DISCORD_RPC_LOCK = threading.RLock()
-DISCORD_RPC_STATE_LOCK = threading.Lock()
-DISCORD_RPC_VOICE_STATE = {"mute": None, "deaf": None, "channel": None}
 DISCORD_VOICE_STATUS = {
     "configured": bool(DISCORD_BOT_TOKEN and DISCORD_USER_ID),
     "connection": "disabled" if not (DISCORD_BOT_TOKEN and DISCORD_USER_ID) else "connecting",
@@ -168,7 +173,7 @@ def refresh_discord_voice_status(bot):
 
 @asynccontextmanager
 async def lifespan(_app):
-    global DISCORD_BOT, DISCORD_RPC_CLIENT
+    global DISCORD_BOT
     bot_task = None
     if DISCORD_VOICE_STATUS["configured"] and discord is None:
         DISCORD_VOICE_STATUS.update({"connection": "error"})
@@ -224,10 +229,6 @@ async def lifespan(_app):
             await asyncio.wait_for(bot_task, timeout=5)
         except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
             bot_task.cancel()
-    with DISCORD_RPC_LOCK:
-        if DISCORD_RPC_CLIENT:
-            DISCORD_RPC_CLIENT.close()
-            DISCORD_RPC_CLIENT = None
 
 
 API_TOKEN = os.getenv("PULSEDECK_API_TOKEN", "")
@@ -241,6 +242,7 @@ AUTH_DIR = os.path.abspath(os.getenv(
 os.makedirs(AUTH_DIR, exist_ok=True)
 AUTH_DB_PATH = os.path.join(AUTH_DIR, "accounts.sqlite3")
 AUTH_SESSIONS: dict[str, str] = {}
+AUTH_SESSION_TYPES: dict[str, str] = {}
 AUTH_ATTEMPTS: dict[str, list[float]] = {}
 AUTH_PAIRINGS: dict[str, tuple[str, float]] = {}
 RECOVERY_REQUEST_ATTEMPTS: dict[str, list[float]] = {}
@@ -262,7 +264,7 @@ SPOTIFY_LOCK = threading.Lock()
 
 
 class AccountCredentials(BaseModel):
-    username: str = Field(min_length=3, max_length=32)
+    username: str = Field(min_length=1, max_length=254)
     password: str = Field(min_length=10, max_length=256)
     email: str | None = Field(default=None, max_length=254)
 
@@ -284,6 +286,14 @@ class RecoveryEmailVerification(BaseModel):
     token: str = Field(min_length=32, max_length=128)
 
 
+class AccountProfileUpdate(BaseModel):
+    username: str = Field(min_length=1, max_length=254)
+    display_name: str = Field(default="", max_length=80)
+    email: str = Field(default="", max_length=254)
+    phone_number: str = Field(default="", max_length=32)
+    profile_photo: str | None = Field(default=None, max_length=1_500_000)
+
+
 class PairingRequest(BaseModel):
     code: str = Field(min_length=32, max_length=64)
 
@@ -295,19 +305,23 @@ def auth_db():
         connection.execute(
             "CREATE TABLE IF NOT EXISTS account (id INTEGER PRIMARY KEY CHECK (id = 1), username TEXT NOT NULL UNIQUE, salt BLOB NOT NULL, password_hash BLOB NOT NULL, email TEXT, email_verified INTEGER NOT NULL DEFAULT 0)"
         )
+        connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS account_username_unique_nocase ON account(username COLLATE NOCASE)")
         account_columns = {row[1] for row in connection.execute("PRAGMA table_info(account)")}
         if "email" not in account_columns:
             connection.execute("ALTER TABLE account ADD COLUMN email TEXT")
         if "email_verified" not in account_columns:
             connection.execute("ALTER TABLE account ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 0")
+        for column in ("display_name", "account_email", "phone_number", "profile_photo"):
+            if column not in account_columns:
+                connection.execute(f"ALTER TABLE account ADD COLUMN {column} TEXT")
+        connection.execute(
+            "UPDATE account SET account_email = username WHERE account_email IS NULL AND instr(username, '@') > 1 AND instr(username, '.') > instr(username, '@')"
+        )
         connection.execute(
             "CREATE TABLE IF NOT EXISTS api_sessions (token_hash TEXT PRIMARY KEY, username TEXT NOT NULL, created_at REAL NOT NULL, session_type TEXT NOT NULL DEFAULT 'pc')"
         )
         connection.execute(
             "CREATE TABLE IF NOT EXISTS spotify_credentials (id INTEGER PRIMARY KEY CHECK (id = 1), access_token TEXT NOT NULL, refresh_token TEXT NOT NULL, expires_at REAL NOT NULL)"
-        )
-        connection.execute(
-            "CREATE TABLE IF NOT EXISTS discord_rpc_credentials (id INTEGER PRIMARY KEY CHECK (id = 1), access_token TEXT NOT NULL, refresh_token TEXT NOT NULL, expires_at REAL NOT NULL, username TEXT NOT NULL DEFAULT '')"
         )
         connection.execute(
             "CREATE TABLE IF NOT EXISTS account_recovery_tokens (token_hash TEXT PRIMARY KEY, account_id INTEGER NOT NULL, purpose TEXT NOT NULL, email TEXT, created_at REAL NOT NULL, expires_at REAL NOT NULL)"
@@ -317,6 +331,13 @@ def auth_db():
             connection.execute(
                 "ALTER TABLE api_sessions ADD COLUMN session_type TEXT NOT NULL DEFAULT 'legacy'"
             )
+        for column, declaration in (
+            ("device_id", "TEXT"),
+            ("device_name", "TEXT"),
+            ("last_seen", "REAL"),
+        ):
+            if column not in session_columns:
+                connection.execute(f"ALTER TABLE api_sessions ADD COLUMN {column} {declaration}")
         yield connection
         connection.commit()
     except Exception:
@@ -329,6 +350,9 @@ def auth_db():
 with auth_db() as auth_connection:
     AUTH_SESSIONS.update(auth_connection.execute(
         "SELECT token_hash, username FROM api_sessions WHERE session_type = 'pc'"
+    ).fetchall())
+    AUTH_SESSION_TYPES.update(auth_connection.execute(
+        "SELECT token_hash, session_type FROM api_sessions WHERE session_type = 'pc'"
     ).fetchall())
 
 
@@ -410,361 +434,34 @@ def account_link_base(request: Request) -> str:
     return f"{parsed.scheme}://{sorted(local_addresses)[0]}{port}"
 
 
-def issue_session(username: str, *, persistent: bool = True) -> str:
+def issue_session(
+    username: str,
+    *,
+    persistent: bool = True,
+    session_type: str = "pc",
+    device_id: str | None = None,
+    device_name: str | None = None,
+) -> str:
     token = secrets.token_urlsafe(32)
     token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
     with AUTH_LOCK:
         if persistent:
             with auth_db() as connection:
                 connection.execute(
-                    "INSERT INTO api_sessions (token_hash, username, created_at, session_type) VALUES (?, ?, ?, 'pc')",
-                    (token_hash, username, time.time()),
+                    "INSERT INTO api_sessions (token_hash, username, created_at, session_type, device_id, device_name, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (token_hash, username, time.time(), session_type, device_id, device_name, time.time() if session_type == "phone" else None),
                 )
         AUTH_SESSIONS[token_hash] = username
+        AUTH_SESSION_TYPES[token_hash] = session_type
     return token
 
 
-class DiscordRpcError(RuntimeError):
-    pass
-
-
-class DiscordLocalRpcClient:
-    """Small Windows IPC client for Discord's authenticated local RPC API."""
-
-    def __init__(self, client_id: str):
-        self.client_id = client_id
-        self.handle = None
-        self._condition = threading.Condition()
-        self._pending = {}
-        self._closed = threading.Event()
-        self._listener = None
-        self._event_callback = None
-        self._connect()
-
-    def _read_exact(self, size: int) -> bytes:
-        result = bytearray()
-        while len(result) < size:
-            error, chunk = win32file.ReadFile(self.handle, size - len(result))
-            if error:
-                raise DiscordRpcError(f"Discord RPC pipe read failed ({error})")
-            if not chunk:
-                raise DiscordRpcError("Discord closed the local RPC connection")
-            result.extend(chunk)
-        return bytes(result)
-
-    def _read_frame(self):
-        opcode, length = struct.unpack("<II", self._read_exact(8))
-        payload = json.loads(self._read_exact(length).decode("utf-8")) if length else {}
-        if opcode == 2:
-            raise DiscordRpcError("Discord closed the local RPC connection")
-        return opcode, payload
-
-    def _write_frame(self, opcode: int, payload):
-        encoded = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-        error, _ = win32file.WriteFile(self.handle, struct.pack("<II", opcode, len(encoded)) + encoded)
-        if error:
-            raise DiscordRpcError(f"Discord RPC pipe write failed ({error})")
-
-    def _connect(self):
-        last_error = None
-        for index in range(10):
-            pipe_name = rf"\\.\pipe\discord-ipc-{index}"
-            try:
-                self.handle = win32file.CreateFile(
-                    pipe_name,
-                    win32con.GENERIC_READ | win32con.GENERIC_WRITE,
-                    0,
-                    None,
-                    win32con.OPEN_EXISTING,
-                    0,
-                    None,
-                )
-            except Exception as exc:
-                last_error = exc
-                continue
-            try:
-                self._write_frame(0, {"v": 1, "client_id": self.client_id})
-                _, response = self._read_frame()
-                if response.get("evt") != "READY":
-                    raise DiscordRpcError("Discord did not complete its local RPC handshake")
-                return
-            except Exception:
-                self.close()
-                raise
-        raise DiscordRpcError("Could not find Discord's local RPC pipe. Open the Discord desktop app and try again.") from last_error
-
-    def request(self, command: str, args=None, event=None):
-        if self.handle is None:
-            raise DiscordRpcError("Discord local RPC is disconnected")
-        nonce = uuid.uuid4().hex
-        payload = {"cmd": command, "args": args or {}, "nonce": nonce}
-        if event:
-            payload["evt"] = event
-        if self._listener and self._listener.is_alive():
-            with self._condition:
-                self._pending[nonce] = None
-            self._write_frame(1, payload)
-            deadline = time.monotonic() + 15
-            with self._condition:
-                while self._pending.get(nonce) is None and not self._closed.is_set():
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        self._pending.pop(nonce, None)
-                        raise DiscordRpcError(f"Discord RPC command {command} timed out")
-                    self._condition.wait(remaining)
-                response = self._pending.pop(nonce, None)
-            if response is None:
-                raise DiscordRpcError("Discord local RPC disconnected during a request")
-            if response.get("evt") == "ERROR" or response.get("cmd") == "ERROR":
-                details = response.get("data") or {}
-                raise DiscordRpcError(details.get("message") or f"Discord RPC command {command} failed")
-            return response.get("data")
-
-        self._write_frame(1, payload)
-        while True:
-            _, response = self._read_frame()
-            if response.get("evt") == "VOICE_SETTINGS_UPDATE" and self._event_callback:
-                self._event_callback("VOICE_SETTINGS_UPDATE", response.get("data") or {})
-                continue
-            if response.get("evt") == "VOICE_CHANNEL_SELECT" and self._event_callback:
-                self._event_callback("VOICE_CHANNEL_SELECT", response.get("data") or {})
-                continue
-            if response.get("nonce") != nonce:
-                continue
-            if response.get("evt") == "ERROR" or response.get("cmd") == "ERROR":
-                details = response.get("data") or {}
-                raise DiscordRpcError(details.get("message") or f"Discord RPC command {command} failed")
-            return response.get("data")
-
-    def start_listening(self, event_callback):
-        if self._listener and self._listener.is_alive():
-            return
-        self._event_callback = event_callback
-
-        def listen():
-            try:
-                while not self._closed.is_set():
-                    _, response = self._read_frame()
-                    event_name = response.get("evt")
-                    if event_name in {"VOICE_SETTINGS_UPDATE", "VOICE_CHANNEL_SELECT"}:
-                        if self._event_callback:
-                            self._event_callback(event_name, response.get("data") or {})
-                        continue
-                    nonce = response.get("nonce")
-                    if nonce:
-                        with self._condition:
-                            if nonce in self._pending:
-                                self._pending[nonce] = response
-                                self._condition.notify_all()
-            except Exception:
-                self._closed.set()
-                with self._condition:
-                    self._condition.notify_all()
-
-        self._listener = threading.Thread(target=listen, name="PulseDeckDiscordRPC", daemon=True)
-        self._listener.start()
-
-    def close(self):
-        self._closed.set()
-        if self.handle is not None:
-            try:
-                win32file.CloseHandle(self.handle)
-            except Exception:
-                pass
-            self.handle = None
-
-
-def discord_rpc_token_row():
-    with auth_db() as connection:
-        return connection.execute(
-            "SELECT access_token, refresh_token, expires_at, username FROM discord_rpc_credentials WHERE id = 1"
-        ).fetchone()
-
-
-def discord_rpc_save_tokens(payload, previous_refresh="", username=""):
-    refresh_token = payload.get("refresh_token") or previous_refresh
-    if not payload.get("access_token") or not refresh_token:
-        raise DiscordRpcError("Discord did not return a refreshable RPC token")
-    expires_at = time.time() + max(60, int(payload.get("expires_in", 604800)) - 60)
-    with auth_db() as connection:
-        connection.execute(
-            "INSERT INTO discord_rpc_credentials (id, access_token, refresh_token, expires_at, username) VALUES (1, ?, ?, ?, ?) "
-            "ON CONFLICT(id) DO UPDATE SET access_token=excluded.access_token, refresh_token=excluded.refresh_token, expires_at=excluded.expires_at, username=excluded.username",
-            (payload["access_token"], refresh_token, expires_at, username),
-        )
-
-
-def discord_rpc_handle_event(event_name, data):
-    with DISCORD_RPC_STATE_LOCK:
-        if event_name == "VOICE_SETTINGS_UPDATE":
-            if "mute" in data:
-                DISCORD_RPC_VOICE_STATE["mute"] = bool(data["mute"])
-            if "deaf" in data:
-                DISCORD_RPC_VOICE_STATE["deaf"] = bool(data["deaf"])
-        elif event_name == "VOICE_CHANNEL_SELECT":
-            DISCORD_RPC_VOICE_STATE["channel"] = data.get("channel_id")
-
-
-def discord_rpc_initialize_connection(client: DiscordLocalRpcClient):
-    voice = client.request("GET_VOICE_SETTINGS") or {}
-    channel = client.request("GET_SELECTED_VOICE_CHANNEL")
-    with DISCORD_RPC_STATE_LOCK:
-        DISCORD_RPC_VOICE_STATE.update({
-            "mute": voice.get("mute"),
-            "deaf": voice.get("deaf"),
-            "channel": channel.get("id") if channel else None,
-        })
-    client.request("SUBSCRIBE", {}, event="VOICE_SETTINGS_UPDATE")
-    client.request("SUBSCRIBE", {}, event="VOICE_CHANNEL_SELECT")
-    client.start_listening(discord_rpc_handle_event)
-
-
-def discord_rpc_refresh_token(row):
-    access_token, refresh_token, expires_at, username = row
-    if expires_at > time.time() + 30:
-        return access_token
-    if not DISCORD_RPC_CLIENT_ID or not DISCORD_RPC_CLIENT_SECRET:
-        raise DiscordRpcError("Set PULSEDECK_DISCORD_CLIENT_ID and PULSEDECK_DISCORD_CLIENT_SECRET")
-    form = urllib.parse.urlencode({
-        "client_id": DISCORD_RPC_CLIENT_ID,
-        "client_secret": DISCORD_RPC_CLIENT_SECRET,
-        "grant_type": "refresh_token",
-        "refresh_token": refresh_token,
-    }).encode("utf-8")
-    request = urllib.request.Request(
-        "https://discord.com/api/v10/oauth2/token",
-        data=form,
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=10) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except Exception as exc:
-        raise DiscordRpcError("Discord RPC authorization expired; reconnect Discord") from exc
-    discord_rpc_save_tokens(payload, refresh_token, username)
-    return payload["access_token"]
-
-
-def discord_rpc_request(command: str, args=None):
-    global DISCORD_RPC_CLIENT
-    if not DISCORD_RPC_CLIENT_ID:
-        raise DiscordRpcError("Set PULSEDECK_DISCORD_CLIENT_ID to enable Discord local RPC")
-    row = discord_rpc_token_row()
-    if not row:
-        raise DiscordRpcError("Connect Discord RPC first")
-    with DISCORD_RPC_LOCK:
-        try:
-            if row[2] <= time.time() + 30 and DISCORD_RPC_CLIENT:
-                DISCORD_RPC_CLIENT.close()
-                DISCORD_RPC_CLIENT = None
-            access_token = discord_rpc_refresh_token(row)
-            if DISCORD_RPC_CLIENT is None or DISCORD_RPC_CLIENT.handle is None or DISCORD_RPC_CLIENT._closed.is_set():
-                DISCORD_RPC_CLIENT = DiscordLocalRpcClient(DISCORD_RPC_CLIENT_ID)
-                DISCORD_RPC_CLIENT.request("AUTHENTICATE", {"access_token": access_token})
-                discord_rpc_initialize_connection(DISCORD_RPC_CLIENT)
-            return DISCORD_RPC_CLIENT.request(command, args)
-        except Exception:
-            if DISCORD_RPC_CLIENT:
-                DISCORD_RPC_CLIENT.close()
-            DISCORD_RPC_CLIENT = None
-            with DISCORD_RPC_STATE_LOCK:
-                DISCORD_RPC_VOICE_STATE.update({"mute": None, "deaf": None, "channel": None})
-            raise
-
-
-def discord_rpc_authorize():
-    global DISCORD_RPC_CLIENT
-    if not DISCORD_RPC_CLIENT_ID or not DISCORD_RPC_CLIENT_SECRET:
-        raise DiscordRpcError("Set PULSEDECK_DISCORD_CLIENT_ID and PULSEDECK_DISCORD_CLIENT_SECRET first")
-    if not DISCORD_RPC_REDIRECT_URI:
-        raise DiscordRpcError("Set PULSEDECK_DISCORD_REDIRECT_URI to a redirect URI registered in your Discord app")
-    with DISCORD_RPC_LOCK:
-        if DISCORD_RPC_CLIENT:
-            DISCORD_RPC_CLIENT.close()
-        DISCORD_RPC_CLIENT = DiscordLocalRpcClient(DISCORD_RPC_CLIENT_ID)
-        response = DISCORD_RPC_CLIENT.request("AUTHORIZE", {
-            "client_id": DISCORD_RPC_CLIENT_ID,
-            "scopes": ["rpc", "identify"],
-        })
-        code = (response or {}).get("code")
-        if not code:
-            raise DiscordRpcError("Discord authorization was not approved")
-        request = urllib.request.Request(
-            "https://discord.com/api/v10/oauth2/token",
-            data=urllib.parse.urlencode({
-                "client_id": DISCORD_RPC_CLIENT_ID,
-                "client_secret": DISCORD_RPC_CLIENT_SECRET,
-                "grant_type": "authorization_code",
-                "code": code,
-                "redirect_uri": DISCORD_RPC_REDIRECT_URI,
-            }).encode("utf-8"),
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=10) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            try:
-                error_payload = json.loads(exc.read().decode("utf-8"))
-            except Exception:
-                error_payload = {}
-            error_code = error_payload.get("error") or f"HTTP {exc.code}"
-            error_description = error_payload.get("error_description") or error_payload.get("message")
-            detail = f"Discord token exchange failed ({error_code})"
-            if error_description:
-                detail += f": {error_description}"
-            elif exc.code == 403:
-                detail += ". Discord denied the token exchange. Check whether this application is approved for the RPC scope, which Discord restricts to approved partners."
-            else:
-                detail += ". Check the client credentials and registered redirect URI."
-            DISCORD_RPC_CLIENT.close()
-            DISCORD_RPC_CLIENT = None
-            raise DiscordRpcError(detail) from exc
-        except Exception as exc:
-            DISCORD_RPC_CLIENT.close()
-            DISCORD_RPC_CLIENT = None
-            raise DiscordRpcError("Discord could not exchange the RPC authorization code. Check the registered redirect URI and app credentials.") from exc
-        auth_data = DISCORD_RPC_CLIENT.request("AUTHENTICATE", {"access_token": payload["access_token"]}) or {}
-        user = auth_data.get("user") or {}
-        username = user.get("global_name") or user.get("username") or "Discord"
-        discord_rpc_save_tokens(payload, username=username)
-        discord_rpc_initialize_connection(DISCORD_RPC_CLIENT)
-        return {"connected": True, "username": username}
-
-
-def discord_rpc_snapshot():
-    row = discord_rpc_token_row()
-    configured = bool(DISCORD_RPC_CLIENT_ID and DISCORD_RPC_CLIENT_SECRET and DISCORD_RPC_REDIRECT_URI)
-    if not row:
-        return {"configured": configured, "connected": False, "username": None, "mute": None, "deaf": None, "channel": None}
-    if not is_discord_running():
-        return {"configured": configured, "connected": False, "username": row[3] or None, "mute": None, "deaf": None, "channel": None, "error": "Discord desktop is closed"}
-    try:
-        with DISCORD_RPC_LOCK:
-            needs_connection = DISCORD_RPC_CLIENT is None or DISCORD_RPC_CLIENT._closed.is_set()
-        if needs_connection:
-            discord_rpc_request("GET_VOICE_SETTINGS")
-        with DISCORD_RPC_STATE_LOCK:
-            state = dict(DISCORD_RPC_VOICE_STATE)
-        return {
-            "configured": configured,
-            "connected": True,
-            "username": row[3] or None,
-            "mute": state["mute"],
-            "deaf": state["deaf"],
-            "channel": state["channel"],
-            "error": None,
-        }
-    except Exception as exc:
-        return {"configured": configured, "connected": False, "username": row[3] or None, "mute": None, "deaf": None, "channel": None, "error": str(exc)}
 
 ALLOWED_ORIGINS = [
     origin.strip()
     for origin in os.getenv(
         "PULSEDECK_ALLOWED_ORIGINS",
-        "http://localhost:5173,http://127.0.0.1:5173",
+        "http://localhost:5173,http://127.0.0.1:5173,http://tauri.localhost",
     ).split(",")
     if origin.strip()
 ]
@@ -818,14 +515,20 @@ def require_token(request: Request, x_api_token: str | None = Header(default=Non
         token_hash = hashlib.sha256(x_api_token.encode("utf-8")).hexdigest()
         username = AUTH_SESSIONS.get(token_hash)
         if username:
+            if AUTH_SESSION_TYPES.get(token_hash) == "phone":
+                with auth_db() as connection:
+                    connection.execute("UPDATE api_sessions SET last_seen = ? WHERE token_hash = ?", (time.time(), token_hash))
             return username
         with auth_db() as connection:
             row = connection.execute(
                 "SELECT username, session_type FROM api_sessions WHERE token_hash = ?",
                 (token_hash,),
             ).fetchone()
-        if row and row[1] == "pc":
+            if row and row[1] == "phone":
+                connection.execute("UPDATE api_sessions SET last_seen = ? WHERE token_hash = ?", (time.time(), token_hash))
+        if row and row[1] in {"pc", "phone"}:
             AUTH_SESSIONS[token_hash] = row[0]
+            AUTH_SESSION_TYPES[token_hash] = row[1]
             return row[0]
         if row and row[1] == "legacy" and request_is_from_host(request):
             with AUTH_LOCK, auth_db() as connection:
@@ -834,10 +537,20 @@ def require_token(request: Request, x_api_token: str | None = Header(default=Non
                     (token_hash,),
                 )
                 AUTH_SESSIONS[token_hash] = row[0]
+                AUTH_SESSION_TYPES[token_hash] = "pc"
             return row[0]
         if API_TOKEN and hmac.compare_digest(x_api_token, API_TOKEN):
             return "legacy"
     raise HTTPException(status_code=401, detail="Sign in to control this PC")
+
+
+def require_pc_session(request: Request, x_api_token: str | None = Header(default=None)):
+    username = require_token(request, x_api_token)
+    if x_api_token:
+        token_hash = hashlib.sha256(x_api_token.encode("utf-8")).hexdigest()
+        if AUTH_SESSION_TYPES.get(token_hash) == "phone":
+            raise HTTPException(status_code=403, detail="Only the PC can manage paired phones")
+    return username
 
 
 @app.get("/", include_in_schema=False)
@@ -865,6 +578,84 @@ def get_auth_status(request: Request):
         "email_recovery_configured": EMAIL_RECOVERY_CONFIGURED,
         "recovery_email_verified": bool(account and account[0] and account[1]),
     }
+
+
+def account_profile_result(row):
+    display_name = row[3]
+    if not display_name:
+        display_name = (row[6] or row[0] or "").split("@", 1)[0].replace(".", " ").replace("_", " ").replace("-", " ").strip()
+    return {
+        "username": row[0],
+        "email": row[6] or "",
+        "recovery_email": row[1] or "",
+        "recovery_email_verified": bool(row[2]),
+        "email_recovery_configured": EMAIL_RECOVERY_CONFIGURED,
+        "display_name": display_name,
+        "phone_number": row[4] or "",
+        "profile_photo": row[5],
+    }
+
+
+@app.get("/api/account/profile")
+def get_account_profile(username: str = Depends(require_token)):
+    if username == "legacy":
+        raise HTTPException(status_code=403, detail="Sign in with your PulseDeck account to view the profile")
+    with auth_db() as connection:
+        row = connection.execute(
+            "SELECT username, email, email_verified, display_name, phone_number, profile_photo, account_email FROM account WHERE id = 1"
+        ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="PulseDeck account not found")
+    return account_profile_result(row)
+
+
+@app.post("/api/account/profile")
+def update_account_profile(payload: AccountProfileUpdate, username: str = Depends(require_token)):
+    if username == "legacy":
+        raise HTTPException(status_code=403, detail="Sign in with your PulseDeck account to update the profile")
+    requested_username = payload.username.strip()
+    if not requested_username:
+        raise HTTPException(status_code=422, detail="Username is required")
+    display_name = payload.display_name.strip()
+    contact_email = normalize_email(payload.email) if payload.email.strip() else ""
+    phone_number = payload.phone_number.strip()
+    profile_photo = payload.profile_photo
+    if profile_photo:
+        match = re.fullmatch(r"data:image/(?:png|jpeg|webp);base64,([A-Za-z0-9+/]*={0,2})", profile_photo)
+        if not match:
+            raise HTTPException(status_code=422, detail="Use a PNG, JPEG, or WebP profile photo")
+        try:
+            photo_bytes = base64.b64decode(match.group(1), validate=True)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail="The profile photo could not be read") from error
+        if not photo_bytes or len(photo_bytes) > 1024 * 1024:
+            raise HTTPException(status_code=422, detail="The profile photo must be smaller than 1 MB")
+    with AUTH_LOCK, auth_db() as connection:
+        account = connection.execute("SELECT username FROM account WHERE id = 1").fetchone()
+        if not account:
+            raise HTTPException(status_code=404, detail="PulseDeck account not found")
+        current_username = account[0]
+        existing_usernames = connection.execute("SELECT username FROM account WHERE id != 1").fetchall()
+        if any(existing[0].casefold() == requested_username.casefold() for existing in existing_usernames):
+            raise HTTPException(status_code=409, detail="That username is already in use")
+        cursor = connection.execute(
+            "UPDATE account SET username = ?, display_name = ?, account_email = ?, phone_number = ?, profile_photo = ? WHERE id = 1",
+            (requested_username, display_name, contact_email, phone_number, profile_photo),
+        )
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail="PulseDeck account not found")
+        row = connection.execute(
+            "SELECT username, email, email_verified, display_name, phone_number, profile_photo, account_email FROM account WHERE id = 1"
+        ).fetchone()
+        if current_username != requested_username:
+            connection.execute("UPDATE api_sessions SET username = ? WHERE username = ?", (requested_username, current_username))
+            for token_hash, session_username in list(AUTH_SESSIONS.items()):
+                if session_username == current_username:
+                    AUTH_SESSIONS[token_hash] = requested_username
+            for pairing_code, (owner, expires_at) in list(AUTH_PAIRINGS.items()):
+                if owner == current_username:
+                    AUTH_PAIRINGS[pairing_code] = (requested_username, expires_at)
+    return account_profile_result(row)
 
 
 @app.get("/api/connect-info")
@@ -895,8 +686,8 @@ def register_account(credentials: AccountCredentials, request: Request):
     if not request_is_from_host(request) and not ALLOW_REMOTE_ACCOUNT_SETUP:
         raise HTTPException(status_code=403, detail="Create the PulseDeck account from the PC running PulseDeck.")
     username = credentials.username.strip()
-    if len(username) < 3:
-        raise HTTPException(status_code=422, detail="Username must contain at least 3 characters")
+    if not username:
+        raise HTTPException(status_code=422, detail="Username is required")
     email = normalize_email(credentials.email) if credentials.email else None
     if email and not EMAIL_RECOVERY_CONFIGURED:
         raise HTTPException(status_code=503, detail="Configure SMTP on the PulseDeck host before adding recovery email")
@@ -963,6 +754,7 @@ def reset_account_password(credentials: AccountCredentials, request: Request):
             connection.execute("DELETE FROM api_sessions")
             connection.execute("DELETE FROM account_recovery_tokens")
         AUTH_SESSIONS.clear()
+        AUTH_SESSION_TYPES.clear()
     return {"token": issue_session(username), "username": username, "remember": True}
 
 
@@ -1079,6 +871,7 @@ def complete_password_recovery(payload: RecoveryCompletion):
         connection.execute("DELETE FROM api_sessions")
         connection.execute("DELETE FROM account_recovery_tokens WHERE account_id = ?", (account_id,))
         AUTH_SESSIONS.clear()
+        AUTH_SESSION_TYPES.clear()
     return {"token": issue_session(username), "username": username, "remember": True}
 
 
@@ -1089,6 +882,7 @@ def logout_account(x_api_token: str | None = Header(default=None)):
         with AUTH_LOCK, auth_db() as connection:
             connection.execute("DELETE FROM api_sessions WHERE token_hash = ?", (token_hash,))
             AUTH_SESSIONS.pop(token_hash, None)
+            AUTH_SESSION_TYPES.pop(token_hash, None)
     return {"status": "ok"}
 
 ARTWORK_CACHE: dict[str, tuple[str, float | None]] = {}
@@ -1215,15 +1009,70 @@ def create_pairing_code(request: Request, username: str = Depends(require_token)
     return {"code": code, "expires_in": PAIRING_TTL_SECONDS}
 
 
+def phone_device_name(user_agent: str) -> str:
+    lowered = user_agent.casefold()
+    if "ipad" in lowered:
+        return "iPad"
+    if "iphone" in lowered:
+        return "iPhone"
+    if "android" in lowered:
+        return "Android phone"
+    return "Phone"
+
+
 @app.post("/api/auth/pair")
-def pair_phone(pairing: PairingRequest):
+def pair_phone(pairing: PairingRequest, request: Request):
     code_hash = hashlib.sha256(pairing.code.encode("utf-8")).hexdigest()
     with PAIRING_LOCK:
         entry = AUTH_PAIRINGS.pop(code_hash, None)
     if not entry or entry[1] <= time.time():
         raise HTTPException(status_code=401, detail="This pairing QR has expired or was already used. Refresh it on the PC.")
     username = entry[0]
-    return {"token": issue_session(username, persistent=True), "username": username, "remember": True}
+    device_name = phone_device_name(request.headers.get("user-agent", ""))
+    device_id = uuid.uuid4().hex
+    token = issue_session(username, persistent=True, session_type="phone", device_id=device_id, device_name=device_name)
+    return {"token": token, "username": username, "remember": True, "device_id": device_id, "device_name": device_name}
+
+
+@app.get("/api/phones")
+def get_connected_phones(username: str = Depends(require_pc_session)):
+    now = time.time()
+    with auth_db() as connection:
+        rows = connection.execute(
+            "SELECT device_id, device_name, created_at, last_seen FROM api_sessions WHERE username = ? AND session_type = 'phone' ORDER BY created_at DESC",
+            (username,),
+        ).fetchall()
+    return {
+        "phones": [
+            {
+                "id": row[0],
+                "name": row[1] or "Phone",
+                "paired_at": row[2],
+                "last_seen": row[3],
+                "connected": row[3] is not None and now - row[3] <= 45,
+            }
+            for row in rows
+        ]
+    }
+
+
+@app.post("/api/phones/{device_id}/remove")
+def remove_connected_phone(device_id: str, username: str = Depends(require_pc_session)):
+    with AUTH_LOCK, auth_db() as connection:
+        rows = connection.execute(
+            "SELECT token_hash FROM api_sessions WHERE username = ? AND session_type = 'phone' AND device_id = ?",
+            (username, device_id),
+        ).fetchall()
+        if not rows:
+            raise HTTPException(status_code=404, detail="That phone is no longer paired")
+        connection.execute(
+            "DELETE FROM api_sessions WHERE username = ? AND session_type = 'phone' AND device_id = ?",
+            (username, device_id),
+        )
+        for (token_hash,) in rows:
+            AUTH_SESSIONS.pop(token_hash, None)
+            AUTH_SESSION_TYPES.pop(token_hash, None)
+    return {"status": "removed", "device_id": device_id}
 
 
 def fetch_album_art(artist: str, title: str) -> str:
@@ -1709,36 +1558,9 @@ def get_live_status():
         "discord": {
             "available": is_discord_running(),
             "voice": {**DISCORD_VOICE_STATUS, "members": list(DISCORD_VOICE_STATUS["members"])},
-            "rpc": discord_rpc_snapshot(),
         },
     }
 
-
-@app.post("/api/discord/rpc/connect", dependencies=[Depends(require_token)])
-def connect_discord_rpc():
-    try:
-        return discord_rpc_authorize()
-    except DiscordRpcError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail="Discord local RPC could not connect") from exc
-
-
-@app.get("/api/discord/rpc/status", dependencies=[Depends(require_token)])
-def get_discord_rpc_status():
-    return discord_rpc_snapshot()
-
-
-@app.post("/api/discord/rpc/disconnect", dependencies=[Depends(require_token)])
-def disconnect_discord_rpc():
-    global DISCORD_RPC_CLIENT
-    with DISCORD_RPC_LOCK:
-        if DISCORD_RPC_CLIENT:
-            DISCORD_RPC_CLIENT.close()
-            DISCORD_RPC_CLIENT = None
-        with auth_db() as connection:
-            connection.execute("DELETE FROM discord_rpc_credentials WHERE id = 1")
-    return {"status": "ok"}
 
 
 @app.get("/api/spotify/status", dependencies=[Depends(require_token)])
@@ -2511,17 +2333,6 @@ def trigger_media(data: MediaPayload):
 
 @app.post("/api/discord", dependencies=[Depends(require_token)])
 def trigger_discord(data: DiscordPayload):
-    if discord_rpc_token_row():
-        try:
-            if data.action == "disconnect":
-                discord_rpc_request("SELECT_VOICE_CHANNEL", {"channel_id": None})
-                return {"status": "ok", "action": "disconnect", "target": "discord-local-rpc"}
-            settings = discord_rpc_request("GET_VOICE_SETTINGS") or {}
-            field = "mute" if data.action == "mute" else "deaf"
-            discord_rpc_request("SET_VOICE_SETTINGS", {field: not bool(settings.get(field, False))})
-            return {"status": "ok", "action": data.action, "target": "discord-local-rpc"}
-        except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"Discord local RPC failed: {exc}") from exc
 
     if data.action == "disconnect":
         if not DISCORD_VOICE_STATUS["configured"] or DISCORD_BOT is None or not DISCORD_BOT.is_ready():

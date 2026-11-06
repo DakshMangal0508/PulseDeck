@@ -7,9 +7,9 @@ import PROFILES from './profiles.js';
 import TouchVolumePill from './VolumeControl.jsx';
 import SportsScores from './SportsScores.jsx';
 import {
-  Activity, CalendarDays, Check, ChevronDown, ChevronRight, Clock3, LoaderCircle,
+  Activity, Battery, Bluetooth, CalendarDays, Check, ChevronRight, Clock3, LoaderCircle,
   Headphones, Mic, Pause, Play, Plus, RefreshCw, Shapes, SkipBack, SkipForward,
-  Users, Volume2, Wifi, Pencil, Trash2, X, Save, Music2, Gamepad2,
+  Users, Volume2, Wifi, Smartphone, Pencil, Trash2, X, Save, Music2, Gamepad2, UserRound, Copy,
   Globe2, Code2, Folder, FileText,
 } from 'lucide-react';
 import {
@@ -125,6 +125,7 @@ function AudioWaveform({ active }) {
 }
 
 export default function PulseDeck() {
+  const isTauriDesktop = Boolean(window.__TAURI__);
   const [profiles, setProfiles] = useState(loadProfiles);
   const [launcherApps, setLauncherApps] = useState(() => {
     try {
@@ -144,21 +145,22 @@ export default function PulseDeck() {
   const [recordingShortcutIndex, setRecordingShortcutIndex] = useState(null);
   const [recordWinModifier, setRecordWinModifier] = useState(false);
   const [autoSwitch, setAutoSwitch] = useState(true);
-  const [showConnection, setShowConnection] = useState(() => !getApiToken());
   const [connectionUrls, setConnectionUrls] = useState([]);
+  const [phoneQrOpen, setPhoneQrOpen] = useState(false);
+  const [phoneConnectionMethod, setPhoneConnectionMethod] = useState('qr');
+  const [phoneLinkCopied, setPhoneLinkCopied] = useState(false);
   const iconPack = 'phosphor';
   const [clockNow, setClockNow] = useState(() => new Date());
   const [isPlaying, setIsPlaying] = useState(null);
   const [track, setTrack] = useState({ title: 'Waiting for Spotify', artist: 'Open Spotify on your PC', artwork: '' });
-  const [spotifyConnection, setSpotifyConnection] = useState({ configured: false, connected: false });
   const [mediaTimeline, setMediaTimeline] = useState({ position: 0, duration: 0, seekMin: 0, seekMax: 0, seekable: false, updatedAt: Date.now() });
   const [online, setOnline] = useState(false);
   const [discordAvailable, setDiscordAvailable] = useState(false);
   const [discordVoice, setDiscordVoice] = useState({ configured: false, connection: 'disabled', guild: null, channel: null, members: [] });
-  const [discordRpc, setDiscordRpc] = useState({ configured: false, connected: false, username: null, mute: null, deaf: null, channel: null, error: null });
-  const [discordRpcConnecting, setDiscordRpcConnecting] = useState(false);
-  const [discordRpcConnectError, setDiscordRpcConnectError] = useState('');
   const [discordControlOverrides, setDiscordControlOverrides] = useState({ mute: null, deafen: null });
+  const [connectedPhones, setConnectedPhones] = useState([]);
+  const [phoneListRefresh, setPhoneListRefresh] = useState(0);
+  const [phoneActionPending, setPhoneActionPending] = useState('');
   const [toast, setToast] = useState('Connecting to PC…');
   const [busyMacroId, setBusyMacroId] = useState(null);
 
@@ -197,7 +199,10 @@ export default function PulseDeck() {
   }, []);
 
   useEffect(() => {
-    if (!showConnection) return undefined;
+    if (!isTauriDesktop || !online || !apiToken) {
+      setConnectionUrls([]);
+      return undefined;
+    }
     let active = true;
     let fetching = false;
     let serverInstanceId = null;
@@ -239,32 +244,56 @@ export default function PulseDeck() {
       active = false;
       window.clearInterval(refreshTimer);
     };
-  }, [showConnection, apiToken]);
+  }, [isTauriDesktop, online, apiToken]);
+
+  useEffect(() => {
+    if (!isTauriDesktop || !online || !apiToken) {
+      setConnectedPhones([]);
+      return undefined;
+    }
+    let active = true;
+    let fetching = false;
+    const refresh = async () => {
+      if (fetching) return;
+      fetching = true;
+      try {
+        const data = await apiRequest('/api/phones');
+        if (active) setConnectedPhones(Array.isArray(data.phones) ? data.phones : []);
+      } catch {
+        if (active) setConnectedPhones([]);
+      } finally {
+        fetching = false;
+      }
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 10000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [isTauriDesktop, online, apiToken, phoneListRefresh]);
 
   const profile = profiles.find((item) => item.id === activeProfile) || profiles[0] || PROFILES.windows;
   const layoutClass = 'grid-cols-1';
   const clockTime = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(clockNow);
   const clockSeconds = new Intl.DateTimeFormat(undefined, { second: '2-digit' }).format(clockNow);
   const clockDate = new Intl.DateTimeFormat(undefined, { weekday: 'long', month: 'short', day: 'numeric' }).format(clockNow);
-  const spotifyVolume = volumes.apps.find((audioApp) => audioApp.process?.toLowerCase() === 'spotify.exe' || audioApp.name?.toLowerCase() === 'spotify');
   const estimatedPosition = mediaTimeline.position + (isPlaying === true ? Math.max(0, (Date.now() - mediaTimeline.updatedAt) / 1000) : 0);
   const currentPosition = Math.min(mediaTimeline.duration, estimatedPosition);
   const seekMin = Math.min(mediaTimeline.seekMin, mediaTimeline.duration);
   const seekMax = Math.max(seekMin, Math.min(mediaTimeline.duration, mediaTimeline.seekMax || mediaTimeline.duration));
   const displayedSeekPosition = Math.max(seekMin, Math.min(seekMax, currentPosition));
   const discordSelfVoice = discordVoice.members.find((member) => member.is_self);
-  const observedDiscordMicMuted = discordRpc.connected ? Boolean(discordRpc.mute) : discordSelfVoice ? discordSelfVoice.self_muted || discordSelfVoice.server_muted : null;
-  const observedDiscordDeafened = discordRpc.connected ? Boolean(discordRpc.deaf) : discordSelfVoice ? discordSelfVoice.self_deafened || discordSelfVoice.server_deafened : null;
+  const activePhone = connectedPhones.find((phone) => phone.connected) || connectedPhones[0] || null;
+  const observedDiscordMicMuted = discordSelfVoice ? discordSelfVoice.self_muted || discordSelfVoice.server_muted : null;
+  const observedDiscordDeafened = discordSelfVoice ? discordSelfVoice.self_deafened || discordSelfVoice.server_deafened : null;
   const discordMicMuted = discordControlOverrides.mute ?? observedDiscordMicMuted;
   const discordDeafened = discordControlOverrides.deafen ?? observedDiscordDeafened;
 
   useEffect(() => {
-    if (!discordRpc.connected && !discordSelfVoice) return;
+    if (!discordSelfVoice) return;
     setDiscordControlOverrides((current) => ({
       mute: current.mute === observedDiscordMicMuted ? null : current.mute,
       deafen: current.deafen === observedDiscordDeafened ? null : current.deafen,
     }));
-  }, [discordSelfVoice?.self_muted, discordSelfVoice?.server_muted, discordSelfVoice?.self_deafened, discordSelfVoice?.server_deafened, discordRpc.connected, discordRpc.mute, discordRpc.deaf]);
+  }, [discordSelfVoice?.self_muted, discordSelfVoice?.server_muted, discordSelfVoice?.self_deafened, discordSelfVoice?.server_deafened]);
 
   const logoutAccount = async () => {
     try { await apiRequest('/api/auth/logout', { method: 'POST', body: {} }); } catch { /* Clear the local session even if the PC is offline. */ }
@@ -272,6 +301,19 @@ export default function PulseDeck() {
     setApiToken('');
     setOnline(false);
     window.location.replace('/account');
+  };
+
+  const removePhone = async (phone) => {
+    setPhoneActionPending(phone.id);
+    try {
+      await apiRequest(`/api/phones/${encodeURIComponent(phone.id)}/remove`, { method: 'POST', body: {} });
+      setConnectedPhones((current) => current.filter((item) => item.id !== phone.id));
+      setToast(`${phone.name} unpaired`);
+    } catch (error) {
+      setToast(error.message || 'Could not unpair this phone');
+    } finally {
+      setPhoneActionPending('');
+    }
   };
 
   useEffect(() => {
@@ -288,13 +330,8 @@ export default function PulseDeck() {
         const data = await apiRequest('/api/status');
         if (!active) return;
         setOnline(true);
-        try {
-          const spotifyStatus = await apiRequest('/api/spotify/status');
-          if (active) setSpotifyConnection(spotifyStatus);
-        } catch { /* Windows media controls work even when OAuth is not configured. */ }
         setDiscordAvailable(Boolean(data.discord?.available));
         setDiscordVoice(data.discord?.voice || { configured: false, connection: 'disabled', guild: null, channel: null, members: [] });
-        setDiscordRpc(data.discord?.rpc || { configured: false, connected: false, username: null, mute: null, deaf: null, channel: null, error: null });
         if (data.spotify) {
           setTrack({
             title: data.spotify.title || 'Not Playing',
@@ -364,7 +401,6 @@ export default function PulseDeck() {
         setOnline(false);
         setDiscordAvailable(false);
         setDiscordVoice((current) => ({ ...current, connection: 'host-offline', guild: null, channel: null, members: [] }));
-        setDiscordRpc((current) => ({ ...current, connected: false }));
         const tokenRejected = /401|sign in|token rejected/i.test(error?.message || '');
         if (tokenRejected) {
           clearAccountSession();
@@ -389,23 +425,6 @@ export default function PulseDeck() {
     };
   }, [autoSwitch, apiToken, profiles]);
 
-  useEffect(() => {
-    if (!online || !discordRpc.connected) return undefined;
-    let active = true;
-    let inFlight = false;
-    const refreshDiscordRpc = async () => {
-      if (inFlight) return;
-      inFlight = true;
-      try {
-        const state = await apiRequest('/api/discord/rpc/status');
-        if (active) setDiscordRpc(state);
-      } catch { /* The regular host status poll handles reconnect and error state. */ }
-      finally { inFlight = false; }
-    };
-    refreshDiscordRpc();
-    const interval = window.setInterval(refreshDiscordRpc, 750);
-    return () => { active = false; window.clearInterval(interval); };
-  }, [online, apiToken, discordRpc.connected]);
 
   useEffect(() => {
     if (!online) return undefined;
@@ -724,15 +743,6 @@ export default function PulseDeck() {
     });
   };
 
-  const connectSpotify = async () => {
-    try {
-      const { url } = await apiRequest('/api/spotify/connect', { method: 'POST', body: {} });
-      window.location.assign(url);
-    } catch (error) {
-      setToast(error.message || 'Could not start Spotify authorization');
-    }
-  };
-
   const handleDiscord = (action, label) => {
     if (navigator.vibrate) navigator.vibrate(15);
     setToast(label);
@@ -749,35 +759,6 @@ export default function PulseDeck() {
     });
   };
 
-  const connectDiscordRpc = async () => {
-    if (discordRpcConnecting) return;
-    setDiscordRpcConnecting(true);
-    setDiscordRpcConnectError('');
-    setToast('Waiting for Discord authorization… Approve the prompt in Discord Desktop.');
-    try {
-      const result = await apiRequest('/api/discord/rpc/connect', { method: 'POST', body: {}, timeoutMs: 180_000 });
-      // The authorization response confirms the token was saved. Update the
-      // UI immediately instead of waiting for the next host status poll.
-      setDiscordRpc((current) => ({
-        ...current,
-        configured: true,
-        connected: true,
-        username: result.username || current.username,
-        error: null,
-      }));
-      setDiscordRpcConnectError('');
-      setToast(`Discord local RPC connected${result.username ? ` as ${result.username}` : ''}`);
-      try {
-        const state = await apiRequest('/api/discord/rpc/status');
-        setDiscordRpc(state);
-      } catch { /* Keep the successful authorization state; polling will retry. */ }
-    } catch (error) {
-      setDiscordRpcConnectError(error.message || 'Discord local RPC could not connect');
-      setToast(error.message || 'Discord local RPC could not connect');
-    } finally {
-      setDiscordRpcConnecting(false);
-    }
-  };
 
   const handleVolume = (target, val) => {
     const revision = (volumeRevisions.current[target] || 0) + 1;
@@ -815,7 +796,78 @@ export default function PulseDeck() {
     <main data-theme="dark" className="deck-shell min-h-screen overflow-x-clip px-3 py-4 text-zinc-100 sm:px-6 sm:py-6 lg:px-10 lg:py-8">
       <div className="deck-orb deck-orb-one" />
       <div className="deck-orb deck-orb-two" />
-      <div className={`deck-content relative z-10 mx-auto flex min-h-[calc(100vh-2rem)] w-full flex-col ${frameWidth}`}>
+      <div className={`deck-content relative z-10 mx-auto flex min-h-[calc(100vh-2rem)] w-full flex-col ${frameWidth}${isTauriDesktop ? ' tauri-app-layout' : ''}`}>
+        {isTauriDesktop && <aside className="phone-link-sidebar" aria-label="Connected phone status">
+          <div className="phone-sidebar-heading">
+            <div className="flex min-w-0 items-center gap-2.5">
+              <div className="section-icon icon-violet"><Smartphone className="h-4 w-4" /></div>
+              <div className="min-w-0">
+                <h2 className="section-title">Connected phone</h2>
+                <p className="section-subtitle">Your device</p>
+              </div>
+            </div>
+            <SpringButton type="button" className="icon-button" disabled={!online} onClick={() => setPhoneListRefresh((value) => value + 1)} aria-label="Refresh connected phone status" title="Refresh phone status">
+              <RefreshCw className="h-4 w-4" />
+            </SpringButton>
+          </div>
+
+          {activePhone ? <>
+            <div className="phone-wallpaper-preview" aria-label="Phone wallpaper preview">
+              {activePhone.wallpaper_url ? <img src={activePhone.wallpaper_url} alt="Connected phone wallpaper" /> : <>
+                <div className="phone-wallpaper-glow" />
+                <Smartphone className="h-9 w-9 text-white/65" />
+                <span>Wallpaper preview needs the phone app</span>
+              </>}
+              <span className={`phone-preview-status ${activePhone.connected ? 'is-connected' : ''}`}><span className="status-led" />{activePhone.connected ? 'CONNECTED' : 'OFFLINE'}</span>
+            </div>
+            <div className="phone-sidebar-device">
+              <div className={`connection-icon ${activePhone.connected ? 'connected' : ''}`}><Smartphone className="h-4 w-4" /></div>
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-sm font-semibold text-zinc-100">{activePhone.name}</p>
+                <p className="mt-0.5 text-[10px] text-zinc-500">{activePhone.connected ? 'Connected to this PC' : activePhone.last_seen ? `Last connected ${new Date(activePhone.last_seen * 1000).toLocaleString(undefined, { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' })}` : 'Paired with this PC'}</p>
+              </div>
+              <SpringButton type="button" className="connection-action" disabled={phoneActionPending === activePhone.id} onClick={() => removePhone(activePhone)}>
+                {phoneActionPending === activePhone.id ? 'Removing…' : 'Unpair'}
+              </SpringButton>
+            </div>
+            <div className="phone-device-indicators" aria-label="Phone details">
+              <div><Wifi className="h-4 w-4" /><span>Wi-Fi</span><strong>Phone app needed</strong></div>
+              <div><Bluetooth className="h-4 w-4" /><span>Bluetooth</span><strong>Phone app needed</strong></div>
+              <div><Battery className="h-4 w-4" /><span>Battery</span><strong>Phone app needed</strong></div>
+            </div>
+            {connectedPhones.length > 1 && <p className="phone-extra-count">+ {connectedPhones.length - 1} more paired phone{connectedPhones.length === 2 ? '' : 's'}</p>}
+            <p className="phone-data-note">Connect the PulseDeck phone app to see your battery, Wi-Fi, Bluetooth, and wallpaper details here.</p>
+          </> : <div className="phone-sidebar-empty">
+            <div className="phone-sidebar-empty-icon"><Smartphone className="h-7 w-7" /></div>
+            <p className="text-sm font-semibold text-zinc-200">No phone connected</p>
+            <p className="text-xs leading-relaxed text-zinc-500">Scan this code with your phone on the same Wi-Fi network.</p>
+          </div>}
+
+          {!activePhone && <div className="phone-pair-card">
+            <p className="text-xs leading-relaxed text-zinc-400">Connect your phone to PulseDeck to see its status here.</p>
+            <SpringButton type="button" className="phone-qr-open" disabled={!connectionUrls.length} onClick={() => setPhoneQrOpen(true)}>Open QR code</SpringButton>
+          </div>}
+        </aside>}
+        {isTauriDesktop && phoneQrOpen && <div className="phone-qr-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setPhoneQrOpen(false); }}>
+          <section className="phone-qr-dialog" role="dialog" aria-modal="true" aria-labelledby="phone-qr-title">
+            <button type="button" className="phone-qr-close" aria-label="Close QR code" onClick={() => setPhoneQrOpen(false)}><X className="h-4 w-4" /></button>
+            <h2 id="phone-qr-title">{activePhone?.name ? `Reconnect ${activePhone.name}` : 'Connect your phone'}</h2>
+            <p className="phone-qr-description">Choose how your phone will reach PulseDeck on this PC.</p>
+            <div className="phone-connection-tabs" role="tablist" aria-label="Phone connection methods">
+              <button type="button" role="tab" aria-selected={phoneConnectionMethod === 'qr'} className={phoneConnectionMethod === 'qr' ? 'is-selected' : ''} onClick={() => setPhoneConnectionMethod('qr')}>QR</button>
+              <button type="button" role="tab" aria-selected={phoneConnectionMethod === 'wifi'} className={phoneConnectionMethod === 'wifi' ? 'is-selected' : ''} onClick={() => setPhoneConnectionMethod('wifi')}>Wi-Fi</button>
+              <button type="button" role="tab" aria-selected={phoneConnectionMethod === 'usb'} className={phoneConnectionMethod === 'usb' ? 'is-selected' : ''} onClick={() => setPhoneConnectionMethod('usb')}>USB</button>
+              <button type="button" role="tab" aria-selected={phoneConnectionMethod === 'bluetooth'} className={phoneConnectionMethod === 'bluetooth' ? 'is-selected' : ''} onClick={() => setPhoneConnectionMethod('bluetooth')}>Bluetooth</button>
+            </div>
+            {phoneConnectionMethod === 'bluetooth' ? <div className="phone-connect-info"><strong>Bluetooth needs the PulseDeck phone app</strong><span>The Android companion app and Bluetooth connection service have not been built yet.</span></div> : phoneConnectionMethod === 'usb' ? <div className="phone-connect-info"><strong>Direct USB connection is planned</strong><span>Plug the phone into this PC. USB tethering is not required. PulseDeck needs its Android companion app and Windows USB support before this connection can work.</span></div> : connectionUrls.length ? phoneConnectionMethod === 'qr' ? (
+              <div className="phone-qr-codes">{connectionUrls.map(({ url, pairingUrl }) => <div className="phone-qr-option" key={url}><div className="phone-qr-code"><QRCodeSVG value={pairingUrl} size={150} level="M" /></div><span>{url.split('//').pop()}</span></div>)}</div>
+            ) : (
+              <div className="phone-link-options">{connectionUrls.map(({ url, pairingUrl }) => <div className="phone-link-option" key={url}><div><strong>{url.split('//').pop()}</strong><span>Phone and PC must use the same Wi-Fi network</span></div><button type="button" onClick={async () => { try { await navigator.clipboard.writeText(pairingUrl); setPhoneLinkCopied(true); window.setTimeout(() => setPhoneLinkCopied(false), 1800); } catch { setToast('Clipboard access is unavailable. Use the QR code instead.'); } }}>{phoneLinkCopied ? 'Copied' : <><Copy className="h-3.5 w-3.5" /> Copy link</>}</button></div>)}</div>
+            ) : <p className="phone-qr-wait">{online ? 'Preparing secure connection methods…' : 'Sign in to PulseDeck to connect a phone.'}</p>}
+            <button type="button" className="phone-qr-dismiss" onClick={() => setPhoneQrOpen(false)}>Close</button>
+          </section>
+        </div>}
+        <div className="tauri-app-main">
         <header className="mb-5 flex flex-wrap items-center justify-between gap-4 border-b border-white/[0.07] pb-5 sm:mb-7 sm:pb-6">
           <div className="flex items-center gap-3">
             <div className="brand-mark"><Activity className="h-5 w-5" /></div>
@@ -829,71 +881,21 @@ export default function PulseDeck() {
           </div>
 
           <div className="flex items-center gap-2">
-            <motion.div className="host-status" role="status" aria-live="polite" layout transition={{ type: 'spring', stiffness: 420, damping: 32 }}>
-              <span className={`status-led ${online ? 'is-online' : ''}`} />
-              <AnimatePresence mode="wait" initial={false}>
-                <motion.span key={online ? 'online' : 'offline'} initial={{ opacity: 0, y: 5 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -5 }} transition={{ duration: 0.16 }}>
-                  {online ? 'HOST CONNECTED' : 'HOST OFFLINE'}
-                </motion.span>
-              </AnimatePresence>
-            </motion.div>
-            <SpringButton
-              type="button"
-              aria-label="Toggle automatic profile switching"
-              aria-pressed={autoSwitch}
-              title="Switch profiles based on the focused PC app"
-              onClick={() => {
-                const next = !autoSwitch;
-                setAutoSwitch(next);
-                setToast(next ? 'Automatic profile switching on' : 'Automatic profile switching off');
-              }}
-              className={`icon-button ${autoSwitch ? 'icon-button-active' : ''}`}
-            >
-              <RefreshCw className="h-4 w-4" />
-            </SpringButton>
-            <SpringButton
-              type="button"
-              className={`icon-button ${showConnection ? 'icon-button-active' : ''}`}
-              aria-label={showConnection ? 'Hide connection settings' : 'Show connection settings'}
-              aria-expanded={showConnection}
-              aria-controls="connection-settings"
-              title={showConnection ? 'Hide connection settings' : 'Show connection settings'}
-              onClick={() => setShowConnection((visible) => !visible)}
-            >
-              <ChevronDown className={`h-4 w-4 transition-transform ${showConnection ? 'rotate-180' : ''}`} />
+            <SpringButton type="button" className="icon-button" aria-label="Open account" title="Account" onClick={() => window.location.assign('/?view=profile')}>
+              <UserRound className="h-4 w-4" />
             </SpringButton>
           </div>
         </header>
+        {isTauriDesktop && activePhone && !activePhone.connected && <div className="phone-reconnect-banner" role="status">
+          <div><strong>We can’t find {activePhone.name} right now.</strong><span>Open PulseDeck on your phone, connect to the same Wi-Fi, then scan the QR code to reconnect.</span></div>
+          <button type="button" onClick={() => setPhoneQrOpen(true)}>Open QR code</button>
+        </div>}
 
-        <AnimatePresence initial={false}>
-        {showConnection && <motion.section id="connection-settings" className="connection-bar mb-5 sm:mb-7" initial={{ opacity: 0, height: 0, y: -10 }} animate={{ opacity: 1, height: 'auto', y: 0 }} exit={{ opacity: 0, height: 0, y: -8 }} transition={{ type: 'spring', stiffness: 320, damping: 30 }} style={{ overflow: 'hidden' }}>
-          <div className="flex min-w-0 items-center gap-3">
-            <div className={`connection-icon ${online ? 'connected' : ''}`}><Wifi className="h-4 w-4" /></div>
-            <div className="min-w-0">
-              <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-zinc-500">Connection</p>
-              <p className="mt-0.5 truncate text-xs text-zinc-300">{online ? `Connected · ${toast}` : toast}</p>
-            </div>
-          </div>
-          <div className="connection-actions">
-            <a href="/account?recovery=setup" className="connection-action">Recovery email</a>
-            <SpringButton type="button" className="connection-action" onClick={logoutAccount}>Sign out</SpringButton>
-          </div>
-          <div className="flex w-full flex-wrap items-center gap-4 border-t border-white/[0.06] pt-3">
-            <div className="min-w-[180px] flex-1">
-              <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-zinc-500">Open on your phone</p>
-              <p className="mt-1 text-[10px] text-zinc-400">Scan within 5 minutes. Phone sign-in ends when the server restarts; keep this QR private.</p>
-            </div>
-            {connectionUrls.length ? connectionUrls.map(({ url, pairingUrl }) => (
-              <a key={url} href={pairingUrl} className="flex items-center gap-3 rounded-xl border border-white/[0.08] bg-black/20 p-2 transition hover:border-[#b4ff00]/30" title={`Pair phone with ${url}`}>
-                <span className="rounded-md bg-white p-1"><QRCodeSVG value={pairingUrl} size={76} level="M" /></span>
-                <span className="max-w-[150px] break-all text-[10px] text-zinc-300">{url}</span>
-              </a>
-            )) : <span className="text-[10px] text-zinc-500">{apiToken ? 'Preparing a secure pairing QR…' : 'Sign in on this PC to create a phone pairing QR.'}</span>}
-          </div>
-        </motion.section>}
-        </AnimatePresence>
 
-        <nav className="mb-5 flex items-center gap-1.5 overflow-x-auto pb-1 sm:mb-7" aria-label="Control profiles">
+
+
+
+        <nav className="mb-5 flex shrink-0 items-center gap-1.5 overflow-x-auto pb-1 sm:mb-7" aria-label="Control profiles">
           <span className="mr-2 hidden text-[10px] font-semibold uppercase tracking-[0.16em] text-zinc-600 sm:inline">Workspace</span>
           {profiles.map((item) => {
             const Icon = iconPack === 'phosphor' ? PHOSPHOR_PROFILE_ICONS[item.id] || item.icon : item.icon;
@@ -974,6 +976,7 @@ export default function PulseDeck() {
           </section>
         </div>}
 
+        <div className="tauri-app-scroll-area">
         <motion.div layout className={`deck-layout grid flex-1 gap-4 ${layoutClass}`} transition={{ type: 'spring', stiffness: 300, damping: 32 }}>
           <section className="flex min-w-0 flex-col gap-4" aria-label="Media and audio controls">
             <motion.article layout className={`surface-card player-card${isPlaying === true ? ' player-card-streaming' : ''}`} whileTap={{ scale: 0.998 }} transition={{ type: 'spring', stiffness: 420, damping: 28 }}>
@@ -983,7 +986,6 @@ export default function PulseDeck() {
                 <div className="flex items-center gap-2">
                   <span className="spotify-tag"><span className="spotify-mark">◖</span> SPOTIFY</span>
                   <AudioWaveform active={isPlaying === true} />
-                  {!spotifyConnection.connected && <SpringButton type="button" onClick={connectSpotify} className="rounded-full border border-emerald-400/30 bg-emerald-400/10 px-2.5 py-1 text-[10px] font-semibold text-emerald-200 hover:bg-emerald-400/20">{spotifyConnection.configured ? 'Connect Spotify' : 'Set up Spotify'}</SpringButton>}
                 </div>
               </div>
               <div className="player-main relative z-10 mt-5 flex min-w-0 items-center gap-4">
@@ -1006,30 +1008,10 @@ export default function PulseDeck() {
                 <div className="min-w-0">
                   <h2 className="track-title">{track.title}</h2>
                   <p className="mt-1 truncate text-sm text-zinc-400">{track.artist}</p>
-                  {!spotifyConnection.connected && <SpringButton type="button" onClick={connectSpotify} className="mt-1.5 rounded-full border border-emerald-400/30 bg-emerald-400/10 px-2.5 py-1 text-[10px] font-semibold text-emerald-200 hover:bg-emerald-400/20">{spotifyConnection.configured ? 'Connect Spotify' : 'Set up Spotify'}</SpringButton>}
                 </div>
               </div>
               <div className="player-footer relative z-10 mt-5 flex items-center justify-between border-t border-white/10 pt-4">
                 <span className="text-[10px] text-zinc-500">{isPlaying === null ? 'Playback state unavailable' : isPlaying ? 'Playing on your PC' : 'Playback paused'}</span>
-                <label className="player-volume" title={spotifyVolume ? `Spotify volume ${spotifyVolume.volume}%` : 'Open Spotify to enable its volume control'}>
-                  <Volume2 className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                  <motion.input
-                    type="range"
-                    min="0"
-                    max="100"
-                    step="1"
-                    aria-label="Spotify volume"
-                    aria-valuetext={spotifyVolume ? `${spotifyVolume.volume}%` : 'Spotify is unavailable'}
-                    value={spotifyVolume?.volume ?? 0}
-                    disabled={!online || !spotifyVolume}
-                    onChange={(event) => spotifyVolume && handleVolume(spotifyVolume.id, Number(event.target.value))}
-                    style={{ '--volume-level': `${spotifyVolume?.volume ?? 0}%` }}
-                    className="player-volume-range"
-                    whileTap={{ scale: 1.015 }}
-                    transition={{ type: 'spring', stiffness: 480, damping: 24 }}
-                  />
-                  <span className="player-volume-value">{spotifyVolume ? `${spotifyVolume.volume}%` : '—'}</span>
-                </label>
                 <div className="flex items-center gap-2">
                   <motion.button type="button" aria-label="Previous Spotify track" title="Previous track" onClick={() => handleMedia('prev', 'Spotify · Previous track')} className="transport-button" whileHover={{ y: -1 }} whileTap={{ scale: 0.9, y: 1 }} transition={{ type: 'spring', stiffness: 480, damping: 25 }}>
                     <SkipBack className="h-4 w-4" />
@@ -1175,7 +1157,7 @@ export default function PulseDeck() {
               <div className="section-heading mb-3">
                 <div className="flex min-w-0 items-center gap-2.5">
                   <div className="section-icon icon-cyan"><Shapes className="h-4 w-4" /></div>
-                  <div className="min-w-0"><h2 className="section-title">Shortcuts</h2><p className="section-subtitle truncate">{profile.label} workspace</p></div>
+                  <div className="min-w-0"><h2 className="section-title">Shortcuts</h2><p className="section-subtitle truncate">{profile.label} profile</p></div>
                 </div>
                 <SpringButton type="button" className="shortcut-edit-button" onClick={() => openProfileEditor(profile)} aria-label={`Edit ${profile.label} app shortcuts`} title="Edit app shortcuts"><Pencil className="h-3.5 w-3.5" /></SpringButton>
               </div>
@@ -1212,7 +1194,7 @@ export default function PulseDeck() {
             <article className="surface-card app-launcher-pane" aria-label="Apps">
               <div className="app-launcher-heading">
                 <div className="section-icon icon-cyan"><Shapes className="h-4 w-4" /></div>
-                <div><h2 className="section-title">Apps</h2><p className="section-subtitle">On your PC</p></div>
+                <div><h2 className="section-title">Apps</h2><p className="section-subtitle">Launch an app</p></div>
               </div>
               <div className="app-launcher-grid">
                 {launcherApps.map((id) => {
@@ -1243,7 +1225,7 @@ export default function PulseDeck() {
               </SpringButton>
             </article>
 
-            <motion.article layout className={`surface-card discord-panel p-4 sm:p-5 lg:p-6${discordRpc.connected ? ' discord-panel-rpc-active' : ''}`} aria-label="Discord voice controls" whileTap={{ scale: 0.998 }} transition={{ type: 'spring', stiffness: 420, damping: 28 }}>
+            <motion.article layout className="surface-card discord-panel p-4 sm:p-5 lg:p-6" aria-label="Discord voice controls" whileTap={{ scale: 0.998 }} transition={{ type: 'spring', stiffness: 420, damping: 28 }}>
               <div className="section-heading mb-3">
                 <div className="flex items-center gap-2.5">
                   <div className="section-icon icon-violet"><Headphones className="h-4 w-4" /></div>
@@ -1251,9 +1233,6 @@ export default function PulseDeck() {
                 </div>
                 <div className="flex items-center gap-2">
                   <span className={`tiny-label ${discordAvailable ? 'discord-ready' : ''}`}>{discordAvailable ? 'READY' : 'OFFLINE'}</span>
-                  {discordRpc.connected
-                    ? <span className="text-[9px] font-semibold text-emerald-300">RPC ON</span>
-                    : <SpringButton type="button" disabled={discordRpcConnecting} onClick={connectDiscordRpc} className="rounded-full border border-violet-400/30 bg-violet-400/10 px-2.5 py-1 text-[10px] font-semibold text-violet-200 hover:bg-violet-400/20 disabled:cursor-wait disabled:opacity-60">{discordRpcConnecting ? 'Waiting for Discord…' : discordRpc.username ? 'Reconnect RPC' : 'Connect RPC'}</SpringButton>}
                 </div>
               </div>
               <div className="discord-controls grid grid-cols-2 gap-2">
@@ -1266,9 +1245,10 @@ export default function PulseDeck() {
                   <AnimatePresence mode="wait" initial={false}><motion.span key={discordSelfVoice?.server_deafened ? 'server-deafened' : discordDeafened ? 'deafened' : 'undeafened'} initial={{ opacity: 0, y: 5 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -5 }} transition={{ duration: 0.14 }}>{discordSelfVoice?.server_deafened ? 'Server deafened' : discordDeafened === null ? 'Toggle deafen' : discordDeafened ? 'Undeafen' : 'Deafen'}</motion.span></AnimatePresence>
                 </motion.button>
               </div>
+              <p className="discord-empty-state mt-2">In Discord Settings &gt; Keybinds, set Mute = Caps Lock + Tab and Deafen = Ctrl + Alt + Shift + F11. Keep Discord open on this PC.</p>
               <div className="discord-voice-status" aria-live="polite">
                 {!discordVoice.configured ? (
-                  <p className="discord-empty-state">{discordRpc.connected ? 'Discord RPC controls your mic and deafen. The optional bot adds server voice status and member lists.' : discordRpc.error ? `RPC authorization exists, but the local connection is unavailable: ${discordRpc.error}` : discordRpc.username ? `Authorized as ${discordRpc.username}, but RPC is offline. Open Discord desktop on the PC running the PulseDeck backend, then reconnect.` : 'Connect RPC for direct Discord mic and deafen controls. The optional bot adds server voice status and member lists.'}</p>
+                  <p className="discord-empty-state">Optional Discord bot setup adds your voice channel and participant list here.</p>
                 ) : discordVoice.connection === 'error' ? (
                   <p className="discord-empty-state">Discord monitor could not connect. Check the bot token and enabled intents.</p>
                 ) : discordVoice.connection !== 'connected' ? (
@@ -1295,10 +1275,11 @@ export default function PulseDeck() {
                   <p className="discord-empty-state">You’re not in a server voice channel visible to the bot.</p>
                 )}
               </div>
-              {discordRpcConnectError && <p className="discord-empty-state mt-2 text-rose-300" role="alert">RPC connection failed: {discordRpcConnectError}</p>}
             </motion.article>
           </section>
         </motion.div>
+        </div>
+        </div>
       </div>
     </main>
   );

@@ -197,7 +197,7 @@ export default function AccountPage() {
             {flow === 'request-reset' && !recoveryEmailVerified && !canResetPassword && <p className="text-[10px] leading-relaxed text-zinc-500">If no recovery email is verified, sign in on the PC and add one from Connection settings.</p>}
             {flow === 'signin' || flow === 'local-reset' ? <motion.label variants={accountItemVariants} className="block space-y-1.5">
               <span className="text-xs font-medium text-zinc-300">Username</span>
-              <input className="token-input h-11 w-full" type="text" autoComplete="username" minLength={3} maxLength={32} required value={username} onChange={(event) => setUsername(event.target.value)} />
+              <input className="token-input h-11 w-full" type="text" autoComplete="username" required value={username} onChange={(event) => setUsername(event.target.value)} />
             </motion.label> : null}
             {flow === 'request-reset' && <motion.label variants={accountItemVariants} className="block space-y-1.5">
               <span className="text-xs font-medium text-zinc-300">Username or recovery email</span>

@@ -32,6 +32,12 @@ For local use, the backend serves the built interface and API on port 8000. Puls
 
 Keep the backend running in your signed-in Windows session. To start it hidden, run `backend\Start-PulseDeck.ps1`; logs go to `backend\backend.log` and `backend\backend-error.log`. To start it at Windows sign-in, run `backend\Install-PulseDeck-AutoStart.ps1`; remove the task with `backend\Uninstall-PulseDeck-AutoStart.ps1`. The app is available at `http://localhost:8000` and, on the same trusted network, from your phone. Windows media and volume controls require the backend to run as your signed-in user, not as a Windows service.
 
+## Windows desktop app (Tauri v2)
+
+The Tauri v2 Windows app has been built and installed for the current Windows user. Open **PulseDeck** from the Start menu; on first launch, create the local PulseDeck account. The app starts its bundled backend and opens the dashboard with a left-side connected phone panel beside the PulseDeck controls. The current QR-linked browser can report pairing/online status only; battery, network details, and a user-shared wallpaper preview depend on the future phone app.
+
+To rebuild the Windows installer, install Rust with the MSVC toolchain, the Visual Studio C++ Build Tools and Windows SDK, then install the Tauri CLI with `cargo install tauri-cli --version "^2" --locked`. From `desktop/`, run `cargo tauri dev` for development or `cargo tauri build` to create the NSIS installer. Installer signing and optional Windows sign-in startup remain later setup work.
+
 ## Deploy the frontend and backend separately
 
 ### Frontend
@@ -40,17 +46,18 @@ Deploy the `frontend/` folder as a static site. Use `npm ci` as the install comm
 
 ### Backend
 
-Deploy the `backend/` folder to a **Windows host or Windows VM** that runs in the signed-in desktop session. This backend uses Windows APIs for audio, keyboard, app launching, and Discord IPC, so a generic Linux Python container cannot provide those features. Set `PULSEDECK_ALLOWED_ORIGINS` to the exact frontend origin (scheme and host), `PULSEDECK_FRONTEND_URL` to the public frontend URL, and `PULSEDECK_ALLOW_REMOTE_SETUP=true` if the first account will be created through the separately hosted frontend. Add other comma-separated frontend origins if needed. A sample is in `backend/.env.example`; configure these values in the platform's environment settings.
+Deploy the `backend/` folder to a **Windows host or Windows VM** that runs in the signed-in desktop session. This backend uses Windows APIs for audio, keyboard, app launching, and media controls, so a generic Linux Python container cannot provide those features. Set `PULSEDECK_ALLOWED_ORIGINS` to the exact frontend origin (scheme and host), `PULSEDECK_FRONTEND_URL` to the public frontend URL, and `PULSEDECK_ALLOW_REMOTE_SETUP=true` if the first account will be created through the separately hosted frontend. Add other comma-separated frontend origins if needed. A sample is in `backend/.env.example`; configure these values in the platform's environment settings.
 
 Mount persistent storage and set `PULSEDECK_DATA_DIR` to it. PulseDeck stores the account database, OAuth refresh tokens, and uploaded sounds there; ephemeral storage loses them when the service is replaced. Use HTTPS for both sites and keep the backend private behind an authenticated HTTPS proxy or VPN. A public frontend calling a plain HTTP backend will be blocked by browsers as mixed content.
 
-For Spotify OAuth, set `PULSEDECK_SPOTIFY_REDIRECT_URI` to `https://api.example.com/api/spotify/callback` and register that exact URL in the Spotify Developer Dashboard. For Discord RPC, register the backend's configured `PULSEDECK_DISCORD_REDIRECT_URI` in the Discord application and set its client credentials on the backend. The Discord IPC connection still requires the backend to run on the Windows PC where Discord Desktop is open.
-
+For Spotify OAuth, set `PULSEDECK_SPOTIFY_REDIRECT_URI` to `https://api.example.com/api/spotify/callback` and register that exact URL in the Spotify Developer Dashboard. 
 The host still accepts only the shortcuts listed in `backend/validation.py`, known media actions, and Windows audio session identifiers returned by the status endpoint, plus the master volume target. The Volume mixer lists apps that currently have an active Windows audio session; an app disappears when its session stops producing audio.
 
 ### Account recovery
 
-PulseDeck stores a salted password hash in its local SQLite account database; it never stores the account password in plaintext. To enable email recovery, configure SMTP on the backend using `PULSEDECK_SMTP_HOST`, `PULSEDECK_SMTP_PORT`, `PULSEDECK_SMTP_USERNAME`, `PULSEDECK_SMTP_PASSWORD`, and `PULSEDECK_SMTP_FROM` (the sender address). Use an app password where your email provider requires one, then restart PulseDeck. `PULSEDECK_FRONTEND_URL` must be the reachable frontend URL so email links open the correct site; for local use, leave it unset to use the backend URL.
+PulseDeck stores a salted password hash in its local SQLite account database; it never stores the account password in plaintext. For the installed Windows app, SMTP settings live in `%LOCALAPPDATA%\com.pulsedeck.desktop\PulseDeck\.env`. PulseDeck creates a Gmail-ready template there the first time it starts. Set `PULSEDECK_SMTP_USERNAME` and `PULSEDECK_SMTP_FROM` to your Gmail address, and `PULSEDECK_SMTP_PASSWORD` to a Google app password. Keep that app password in this local file; do not commit or share it. Restart PulseDeck after saving.
+
+For Gmail, enable 2-Step Verification on the Google account and create an app password. Use `smtp.gmail.com`, port `587`, `PULSEDECK_SMTP_USE_SSL=false`, and `PULSEDECK_SMTP_STARTTLS=true`. Google may hide app passwords for accounts using certain security configurations. `PULSEDECK_FRONTEND_URL` must be the reachable frontend URL so email links open the correct site; for local use, leave it unset to use the backend URL.
 
 New accounts can add an optional recovery email during setup. Existing users can sign in on the PC, open **Connection → Recovery email**, and verify an address. From then on, **Forgot password?** emails a one-time link that expires in 30 minutes; using it signs out existing devices. If email recovery is unavailable, the password can only be reset locally from the PC running PulseDeck.
 
@@ -67,24 +74,12 @@ $env:PULSEDECK_SPOTIFY_CLIENT_SECRET = "your-client-secret"
 
 For a separate deployment, use the public HTTPS callback described above. Restart the host, open PulseDeck, and choose **Connect** on the Spotify card. Approve the requested playback read and control access. PulseDeck stores the refresh token in its data directory and refreshes access tokens automatically. Keep the client secret private. Spotify account and app restrictions may apply to playback controls.
 
-The Discord panel can use authenticated Discord local RPC for direct mute, deafen, and leave-voice controls. RPC keeps a local IPC connection open to Discord Desktop so voice-setting changes remain active. The optional bot remains useful for the server member list and voice-channel status.
 
-### Enable Discord local RPC
+### Discord mute and deafen
 
-1. Create or select an application in the [Discord Developer Portal](https://discord.com/developers/applications). Add `http://localhost:8000` under its **RPC Origins** and as an OAuth2 **Redirect URI**. If the app is still in development, add your Discord account to its RPC testers.
-2. Set the application's client ID and client secret in the PowerShell session used to start PulseDeck:
+Discord mute and deafen use keyboard shortcuts and do not require Discord authorization. In Discord **Settings → Keybinds**, set **Toggle Mute** to `Caps Lock + Tab` and **Toggle Deafen** to `Ctrl + Alt + Shift + F11`. Leave Discord open on the PC running PulseDeck. The buttons send these shortcuts; Discord does not report the resulting state unless the optional voice status bot is configured.
 
-```powershell
-$env:PULSEDECK_DISCORD_CLIENT_ID = "your-discord-application-id"
-$env:PULSEDECK_DISCORD_CLIENT_SECRET = "your-discord-client-secret"
-$env:PULSEDECK_DISCORD_REDIRECT_URI = "http://localhost:8000"
-```
-
-3. Restart the host, open Discord Desktop, then choose **Connect RPC** in PulseDeck and approve its Discord authorization prompt. PulseDeck stores the refresh token in its data directory and refreshes it automatically. Keep the client secret private.
-
-Discord documents the [local RPC IPC protocol](https://discord.com/developers/docs/topics/rpc) and its [voice settings commands](https://discord.com/developers/docs/topics/rpc#set-voice-settings). Local RPC requires a Discord application and user authorization. The optional bot setup below only adds server voice status and participant lists.
-
-### Enable Discord voice status
+### Optional Discord voice status
 
 1. Create your own Discord application in the [Discord Developer Portal](https://discord.com/developers/applications), then open its **Bot** page and add a bot. PulseDeck needs this private helper bot; you do not need to find or add a public third-party bot.
 2. On the **Bot** page, enable **Server Members Intent**. PulseDeck uses the bot to find your member and read voice-state updates. Discord describes this as a privileged intent; for a small personal bot you can enable it in the Developer Portal.
@@ -133,7 +128,7 @@ PulseDeck uses a local account and session token. In the combined local setup, p
 - **Phone sign-in required after a server restart:** scan a fresh QR from the PC. The PC's remembered sign-in survives server restarts.
 - **Page not found in combined local mode:** run `npm run build` from `frontend/` before starting the backend.
 - **App volume is unavailable:** start audio in that app so Windows creates an active audio session.
-- **Discord voice status does not update:** check that the bot token and user ID are set, Server Members Intent is enabled, the bot can view the server voice channel, and the host can make outbound TCP connections to `discord.com` on port 443. A firewall, endpoint security product, VPN, or managed network may block that connection. Mute/deafen keybinds must also be configured in Discord.
+- **Discord voice status does not update:** check that the bot token and user ID are set, Server Members Intent is enabled, the bot can view the server voice channel, and the host can make outbound TCP connections to `discord.com` on port 443. A firewall, endpoint security product, VPN, or managed network may block that connection. Set Discord keybinds to Caps Lock + Tab for mute and Ctrl + Alt + Shift + F11 for deafen; leave Discord open on the host PC.
 
 ## Checks
 

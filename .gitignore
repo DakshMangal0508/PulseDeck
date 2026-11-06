@@ -10,3 +10,8 @@ __pycache__/
 !.env.example
 .pytest_cache/
 .coverage
+desktop/build/
+desktop/backend-dist/
+desktop/src-tauri/target/
+desktop/src-tauri/gen/
+desktop/*.spec

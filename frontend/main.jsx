@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import PulseDeck from './App.jsx';
 import AccountPage from './AccountPage.jsx';
+import ProfilePage from './ProfilePage.jsx';
 import ErrorPage from './ErrorPage.jsx';
 import { API_BASE, saveAccountSession } from './api.js';
 import './style.css';
@@ -11,6 +12,7 @@ function AppEntry() {
   const pairingCode = new URLSearchParams(window.location.hash.slice(1)).get('pair');
   const accountHash = new URLSearchParams(window.location.hash.slice(1));
   const accountPath = window.location.pathname.replace(/\/+$/, '') === '/account';
+  const accountView = new URLSearchParams(window.location.search).get('view');
   const recoveryLink = accountHash.has('recover') || accountHash.has('verify-email') || new URLSearchParams(window.location.search).get('recovery') === 'setup';
   const normalizedPath = window.location.pathname.replace(/\/+$/, '') || '/';
   const dashboardPath = normalizedPath === '/' || normalizedPath === '/index.html';
@@ -62,7 +64,8 @@ function AppEntry() {
     );
   }
 
-  if (accountPath || recoveryLink) return <AccountPage />;
+  if (accountView === 'profile' && !recoveryLink) return <ProfilePage />;
+  if (accountPath || accountView === 'signin' || recoveryLink) return <AccountPage />;
   if (dashboardPath) return <PulseDeck />;
   return <ErrorPage kind="notFound" />;
 }
